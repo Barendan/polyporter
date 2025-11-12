@@ -445,7 +445,7 @@ export interface EnhancedCityResponse extends CityResponse {
 // Create buffered polygon using Turf.js
 export function createBufferedPolygon(
   geojson: Feature<Polygon | MultiPolygon>, 
-  bufferKm: number = 2
+  bufferKm: number = 1
 ): Feature<Polygon | MultiPolygon> {
   // Import turf dynamically to avoid SSR issues
   const turf = require('@turf/turf');
@@ -665,7 +665,7 @@ export function createEnhancedCityResponse(
   try {
     // Create buffered polygon
     console.log(`🏗️ Step 1: Creating buffered polygon...`);
-    const bufferedPolygon = createBufferedPolygon(baseResponse.geojson, 2);
+    const bufferedPolygon = createBufferedPolygon(baseResponse.geojson, 1);
     console.log(`🏗️ Buffered polygon created successfully`);
     
     // Generate H3 grid from buffered polygon (covering entire buffered area)

@@ -526,7 +526,7 @@ export default function CityMap({ cityData }: CityMapProps) {
               className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
             />
             <span className="text-sm font-medium text-gray-700">
-              Show Buffered Area (2km)
+              Show Buffered Area (1km)
             </span>
           </label>
           
@@ -572,7 +572,7 @@ export default function CityMap({ cityData }: CityMapProps) {
           </div>
           <div className="flex items-center space-x-2">
             <div className="w-4 h-4 bg-purple-600 rounded opacity-60"></div>
-            <span>Buffered Area (2km)</span>
+            <span>Buffered Area (1km)</span>
           </div>
           <div className="flex items-center space-x-2">
             <div className="w-4 h-4 bg-green-600 rounded opacity-40"></div>

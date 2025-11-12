@@ -134,7 +134,7 @@ export default function Home() {
               </div>
             </div>
             <div className="mt-3 text-xs text-green-600 text-center">
-              Buffer: 2km | Grid ensures edge-case businesses aren't missed
+              Buffer: 1km | Grid ensures edge-case businesses aren't missed
             </div>
             <div className="mt-2 text-xs text-green-500 text-center">
               💡 Resolution 7 hexagons (~4.8 km²) will subdivide to Resolution 8 if density &gt; 240 businesses
