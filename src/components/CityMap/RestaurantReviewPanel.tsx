@@ -106,6 +106,10 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
   const [detailsSortOrder, setDetailsSortOrder] = useState<'asc' | 'desc'>('asc');
   const [detailsFilterStatus, setDetailsFilterStatus] = useState<string>('all');
 
+  // Restaurant filter state - for filtering franchises and zero-rated restaurants
+  const [filterOutFranchises, setFilterOutFranchises] = useState(false);
+  const [filterOutZeroRating, setFilterOutZeroRating] = useState(false);
+
   // FIX: Move early return check AFTER all hooks are called
   // All hooks must be called in the same order on every render
 
@@ -176,6 +180,76 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
     return miles.toFixed(1);
   };
   
+  // Franchise detection with strict regex and word boundaries
+  // This function detects major restaurant chains using precise pattern matching
+  // to minimize false positives while catching common franchise variations
+  const detectFranchise = (restaurantName: string): boolean => {
+    if (!restaurantName) return false;
+    
+    // Normalize: lowercase, remove apostrophes and special quotes
+    const normalized = restaurantName.toLowerCase().replace(/['']/g, '');
+    
+    // Franchise patterns with word boundaries - covers major chains
+    // Each pattern uses \b for word boundaries to avoid false matches
+    const franchisePatterns = [
+      // Fast Food - Burgers
+      /\b(mcdonald'?s?|burger\s+king|wendy'?s?|five\s+guys|in-n-out|shake\s+shack|smashburger|white\s+castle)\b/,
+      
+      // Fast Food - Sandwiches & Subs
+      /\b(subway|jimmy\s+john'?s?|jersey\s+mike'?s?|firehouse\s+subs?|quiznos|potbelly)\b/,
+      
+      // Fast Food - Chicken
+      /\b(chick-fil-a|chickfila|kfc|kentucky\s+fried|popeye'?s?|raising\s+cane'?s?|wingstop|buffalo\s+wild\s+wings?)\b/,
+      
+      // Fast Food - Mexican
+      /\b(taco\s+bell|chipotle|qdoba|del\s+taco|taco\s+cabana|moe'?s?\s+southwest)\b/,
+      
+      // Fast Food - Pizza
+      /\b(pizza\s+hut|domino'?s?|papa\s+john'?s?|little\s+caesars?|marco'?s?\s+pizza|papa\s+murphy'?s?)\b/,
+      
+      // Fast Food - Other
+      /\b(panda\s+express|arby'?s?|sonic\s+drive-in|sonic|dairy\s+queen|culver'?s?|portillo'?s?)\b/,
+      
+      // Coffee & Breakfast
+      /\b(starbucks|dunkin'?(\s+donuts)?|tim\s+hortons?|panera\s+bread|ihop|denny'?s?|waffle\s+house|cracker\s+barrel)\b/,
+      
+      // Casual Dining
+      /\b(applebee'?s?|chili'?s?|olive\s+garden|red\s+lobster|outback\s+steakhouse|texas\s+roadhouse|longhorn\s+steakhouse)\b/,
+      
+      // Fast Casual & Modern Chains
+      /\b(cava|sweetgreen|blaze\s+pizza|mod\s+pizza|&pizza|pieology)\b/,
+    ];
+    
+    // Test against all patterns
+    return franchisePatterns.some(pattern => pattern.test(normalized));
+  };
+  
+  // Calculate filter statistics
+  // Returns counts for each filter type and overlap
+  // NOTE: This function must be defined AFTER detectFranchise since it calls it
+  const getFilterStats = () => {
+    const allRestaurants = getAllRestaurants();
+    const totalCount = allRestaurants.length;
+    
+    // Count what would be filtered by each filter
+    const franchiseCount = allRestaurants.filter(r => detectFranchise(r.name)).length;
+    const zeroRatingCount = allRestaurants.filter(r => r.rating === 0).length;
+    
+    // Count overlap (restaurants that match both filters)
+    const bothFiltersCount = allRestaurants.filter(r => 
+      detectFranchise(r.name) && r.rating === 0
+    ).length;
+    
+    return {
+      total: totalCount,
+      franchises: franchiseCount,
+      zeroRating: zeroRatingCount,
+      bothFilters: bothFiltersCount,
+      // Unique count if both filters active (avoiding double-count)
+      combinedFilterCount: franchiseCount + zeroRatingCount - bothFiltersCount
+    };
+  };
+  
   // Handle restaurant approval/rejection
   const handleRestaurantReview = async (restaurantId: string, status: 'approved' | 'rejected') => {
     // Rejection is a no-op - we just track it in UI, don't save to staging
@@ -211,12 +285,13 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
         throw new Error('Missing import log ID or city ID. Please run a new search.');
       }
 
-      const response = await fetch('/api/yelp/staging/bulk-create', {
+      const response = await fetch('/api/yelp/staging', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          action: 'bulk-create',
           restaurants: [restaurant],
           h3Id,
           cityId: yelpResults.cityId,
@@ -426,12 +501,13 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
 
       for (const [h3Id, restaurants] of restaurantsByHexagon.entries()) {
         try {
-          const response = await fetch('/api/yelp/staging/bulk-create', {
+          const response = await fetch('/api/yelp/staging', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
+              action: 'bulk-create',
               restaurants,
               h3Id,
               cityId: yelpResults.cityId,
@@ -566,6 +642,16 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
   const processedRestaurants = useMemo(() => {
     let restaurants = getAllRestaurants();
     
+    // Apply franchise filter FIRST (before search)
+    if (filterOutFranchises) {
+      restaurants = restaurants.filter(r => !detectFranchise(r.name));
+    }
+    
+    // Apply zero-rating filter SECOND (before search)
+    if (filterOutZeroRating) {
+      restaurants = restaurants.filter(r => r.rating > 0);
+    }
+    
     // Apply search filter
     if (restaurantSearch) {
       const searchLower = restaurantSearch.toLowerCase();
@@ -585,7 +671,7 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
     });
     
     return sorted;
-  }, [restaurantSearch, restaurantSortOrder, yelpResults, reviewedRestaurantIds]);
+  }, [restaurantSearch, restaurantSortOrder, yelpResults, reviewedRestaurantIds, filterOutFranchises, filterOutZeroRating]);
 
   // Paginated restaurants
   const paginatedRestaurants = useMemo(() => {
@@ -1274,6 +1360,46 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
                   </div>
                 </div>
 
+                {/* Filter Statistics Banner - Shows when filters are active */}
+                {(filterOutFranchises || filterOutZeroRating) && (() => {
+                  const stats = getFilterStats();
+                  const filteredOutCount = stats.total - processedRestaurants.length;
+                  
+                  return (
+                    <div className="bg-gradient-to-r from-orange-50 to-amber-50 px-4 py-2.5 border-b border-orange-200">
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <div className="flex items-center gap-2">
+                          <span className="text-orange-600 text-lg">🔍</span>
+                          <div className="text-xs">
+                            <span className="font-bold text-orange-800">
+                              {filteredOutCount} restaurant{filteredOutCount !== 1 ? 's' : ''} hidden
+                            </span>
+                            <span className="text-orange-600 ml-1">by active filters</span>
+                          </div>
+                        </div>
+                        
+                        <div className="flex items-center gap-2 text-[10px]">
+                          {filterOutFranchises && (
+                            <span className="bg-red-100 text-red-700 px-2 py-1 rounded-full font-semibold">
+                              🚫 {stats.franchises} chains
+                            </span>
+                          )}
+                          {filterOutZeroRating && (
+                            <span className="bg-yellow-100 text-yellow-700 px-2 py-1 rounded-full font-semibold">
+                              ⭐ {stats.zeroRating} unrated
+                            </span>
+                          )}
+                          {filterOutFranchises && filterOutZeroRating && stats.bothFilters > 0 && (
+                            <span className="bg-gray-100 text-gray-600 px-2 py-1 rounded-full font-semibold">
+                              {stats.bothFilters} overlap
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* Section 2: Search & Filter Controls */}
                 <div className="bg-gradient-to-br from-slate-50 to-blue-50 px-4 py-3 border-b border-gray-200">
                   <div className="flex flex-col sm:flex-row gap-2">
@@ -1294,17 +1420,58 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
                       />
                     </div>
                     
-                    {/* Sort Button */}
-                    <button
-                      onClick={() => {
-                        setRestaurantSortOrder(restaurantSortOrder === 'asc' ? 'desc' : 'asc');
-                        setRestaurantPage(1);
-                      }}
-                      className="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white font-bold rounded-lg hover:from-purple-600 hover:to-pink-600 focus:ring-2 focus:ring-purple-300 transition-all duration-200 shadow-sm hover:shadow-md transform hover:scale-[1.01] active:scale-95 flex items-center justify-center gap-1.5 whitespace-nowrap min-w-[120px] text-sm"
-                    >
-                      <span>{restaurantSortOrder === 'asc' ? 'A→Z' : 'Z→A'}</span>
-                      <span className="text-xs">{restaurantSortOrder === 'asc' ? '↑' : '↓'}</span>
-                    </button>
+                    {/* Filter & Sort Buttons Group */}
+                    <div className="flex gap-2">
+                      {/* Franchise Filter Button */}
+                      <button
+                        onClick={() => {
+                          setFilterOutFranchises(!filterOutFranchises);
+                          setRestaurantPage(1); // Reset pagination
+                        }}
+                        className={`px-3 py-2 font-bold rounded-lg focus:ring-2 transition-all duration-200 shadow-sm hover:shadow-md transform hover:scale-[1.02] active:scale-95 flex items-center justify-center gap-1.5 whitespace-nowrap text-xs ${
+                          filterOutFranchises 
+                            ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white hover:from-orange-600 hover:to-red-600 focus:ring-orange-300'
+                            : 'bg-white text-gray-700 border border-gray-300 hover:border-orange-400 hover:bg-orange-50 focus:ring-orange-200'
+                        }`}
+                        title={filterOutFranchises ? 'Show chain restaurants' : 'Hide chain restaurants (McDonald\'s, Subway, etc.)'}
+                      >
+                        <span>🚫</span>
+                        <span className="hidden sm:inline">
+                          {filterOutFranchises ? 'Chains Off' : 'Hide Chains'}
+                        </span>
+                      </button>
+                      
+                      {/* Zero Rating Filter Button */}
+                      <button
+                        onClick={() => {
+                          setFilterOutZeroRating(!filterOutZeroRating);
+                          setRestaurantPage(1); // Reset pagination
+                        }}
+                        className={`px-3 py-2 font-bold rounded-lg focus:ring-2 transition-all duration-200 shadow-sm hover:shadow-md transform hover:scale-[1.02] active:scale-95 flex items-center justify-center gap-1.5 whitespace-nowrap text-xs ${
+                          filterOutZeroRating 
+                            ? 'bg-gradient-to-r from-yellow-500 to-amber-500 text-white hover:from-yellow-600 hover:to-amber-600 focus:ring-yellow-300'
+                            : 'bg-white text-gray-700 border border-gray-300 hover:border-yellow-400 hover:bg-yellow-50 focus:ring-yellow-200'
+                        }`}
+                        title={filterOutZeroRating ? 'Show unrated restaurants' : 'Hide unrated restaurants (0 stars)'}
+                      >
+                        <span>⭐</span>
+                        <span className="hidden sm:inline">
+                          {filterOutZeroRating ? '0★ Off' : 'Hide 0★'}
+                        </span>
+                      </button>
+                      
+                      {/* Sort Button */}
+                      <button
+                        onClick={() => {
+                          setRestaurantSortOrder(restaurantSortOrder === 'asc' ? 'desc' : 'asc');
+                          setRestaurantPage(1);
+                        }}
+                        className="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white font-bold rounded-lg hover:from-purple-600 hover:to-pink-600 focus:ring-2 focus:ring-purple-300 transition-all duration-200 shadow-sm hover:shadow-md transform hover:scale-[1.01] active:scale-95 flex items-center justify-center gap-1.5 whitespace-nowrap text-sm"
+                      >
+                        <span>{restaurantSortOrder === 'asc' ? 'A→Z' : 'Z→A'}</span>
+                        <span className="text-xs">{restaurantSortOrder === 'asc' ? '↑' : '↓'}</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
 

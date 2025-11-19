@@ -136,7 +136,7 @@ export default function YelpIntegration({ cityData, onResultsUpdate }: YelpInteg
     if (yelpTesting && totalHexagonsRef.current > 0) {
       const pollProgress = async () => {
         try {
-          const response = await fetch('/api/yelp?action=status');
+          const response = await fetch('/api/yelp/search?action=status');
           if (response.ok) {
             const status = await response.json();
             if (status.progress) {
@@ -211,7 +211,7 @@ export default function YelpIntegration({ cityData, onResultsUpdate }: YelpInteg
       totalHexagonsRef.current = totalHexagons;
       setProgress({ total: totalHexagons, processed: 0, remaining: totalHexagons, currentPhase: 'phase1' });
       
-      const response = await fetch('/api/yelp', {
+      const response = await fetch('/api/yelp/search', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -278,7 +278,7 @@ export default function YelpIntegration({ cityData, onResultsUpdate }: YelpInteg
     
     // Otherwise, fetch and show
     try {
-      const response = await fetch('/api/yelp?action=quota');
+      const response = await fetch('/api/yelp/search?action=quota');
       if (response.ok) {
         const quota = await response.json();
         setQuotaStatus(quota);
