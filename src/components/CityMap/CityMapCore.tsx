@@ -3,8 +3,8 @@
 import { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet.markercluster';
-import { EnhancedCityResponse } from '@/lib/geo';
-import type { YelpBusiness } from '@/lib/yelpSearch';
+import type { EnhancedCityResponse } from '@/lib/geography/cityTypes';
+import type { YelpBusiness } from '@/lib/yelp/search';
 
 // Fix for default markers in Leaflet
 delete (L.Icon.Default.prototype as { _getIconUrl?: string })._getIconUrl;
@@ -42,21 +42,12 @@ export default function CityMapCore({
   // Initialize map with performance optimizations
   useEffect(() => {
     if (!mapRef.current) {
-      console.log('🗺️ Initializing map...');
-      
       // Ensure the map container exists and has dimensions
       const mapContainer = document.getElementById('map');
       if (!mapContainer) {
         console.error('❌ Map container not found');
         return;
       }
-      
-      console.log('📏 Map container dimensions:', {
-        width: mapContainer.offsetWidth,
-        height: mapContainer.offsetHeight,
-        clientWidth: mapContainer.clientWidth,
-        clientHeight: mapContainer.clientHeight
-      });
       
       const map = L.map('map', {
         preferCanvas: true, // Better performance for many future restaurant markers
@@ -76,18 +67,11 @@ export default function CityMapCore({
 
       mapRef.current = map;
       onMapReady(map);
-      console.log('✅ Map initialized successfully');
-      
-      // Small delay to ensure map is fully ready
-      setTimeout(() => {
-        console.log('⏳ Map ready delay completed');
-      }, 100);
     }
 
     // Cleanup function
     return () => {
       if (mapRef.current) {
-        console.log('🧹 Cleaning up map...');
         mapRef.current.remove();
         mapRef.current = null;
       }
@@ -99,8 +83,6 @@ export default function CityMapCore({
     if (!mapRef.current || !cityData) return;
 
     const map = mapRef.current;
-    
-    console.log('🗺️ Adding city data layers to map...');
 
     // Remove existing layers
     if (cityLayerRef.current) {
@@ -145,7 +127,6 @@ export default function CityMapCore({
 
     // Add H3 grid layer
     if (showH3Grid && cityData.h3_grid.length > 0) {
-      console.log(`🗺️ Rendering H3 grid with ${cityData.h3_grid.length} hexagons (covering entire buffered area)`);
       const h3GridLayer = L.layerGroup();
       
       // Import h3 dynamically to avoid SSR issues
@@ -160,7 +141,6 @@ export default function CityMapCore({
             
             // Validate boundary coordinates
             if (!boundary || !Array.isArray(boundary) || boundary.length < 3) {
-              console.warn(`⚠️ Invalid boundary for hexagon ${i}: ${h3Index}`);
               return;
             }
             
@@ -203,49 +183,26 @@ export default function CityMapCore({
               
               const labelMarker = L.marker(center, { icon: label });
               h3GridLayer.addLayer(labelMarker);
-              
-              // Log first few hexagon numbers for debugging
-              if (i < 5) {
-                console.log(`🔢 Hexagon ${i} labeled at center: [${center.lat.toFixed(4)}, ${center.lng.toFixed(4)}]`);
-              }
             }
             
             h3GridLayer.addLayer(polygon);
             renderedCount++;
-            
-            // Log first few hexagons for debugging
-            if (i < 3) {
-              console.log(`🔷 Hexagon ${i}: ${h3Index}, boundary:`, boundary);
-              console.log(`🔷 Leaflet coords:`, polygonCoords);
-            }
           } catch (hexError) {
-            console.warn(`⚠️ Error rendering hexagon ${i}:`, hexError);
+            console.error(`Error rendering hexagon ${i}:`, hexError);
           }
         });
         
         if (renderedCount > 0) {
           h3GridLayer.addTo(map);
           h3GridLayerRef.current = h3GridLayer;
-          console.log(`✅ H3 grid layer added to map with ${renderedCount} hexagons`);
-          if (showHexagonNumbers) {
-            console.log(`🔢 Hexagon numbers are ${showHexagonNumbers ? 'enabled' : 'disabled'}`);
-          }
-          
-          // Log the map bounds and zoom level for debugging
-          console.log(`🗺️ Map bounds:`, map.getBounds());
-          console.log(`🔍 Map zoom level:`, map.getZoom());
           
           // Force a map refresh to ensure hexagons are visible
           map.invalidateSize();
-        } else {
-          console.warn(`⚠️ No hexagons were successfully rendered`);
         }
         
       } catch (error) {
         console.error('Error rendering H3 grid:', error);
       }
-    } else {
-      console.log(`⚠️ H3 grid not rendered: showH3Grid=${showH3Grid}, h3_grid.length=${cityData.h3_grid.length}`);
     }
 
     // Fit bounds to city with padding
@@ -272,21 +229,29 @@ export default function CityMapCore({
 
     const map = mapRef.current;
     
+    // CRITICAL: Store current map view BEFORE doing anything
+    const currentCenter = map.getCenter();
+    const currentZoom = map.getZoom();
+    
     // Remove existing layer
     if (restaurantLayerRef.current) {
       map.removeLayer(restaurantLayerRef.current);
       restaurantLayerRef.current.clearLayers();
     }
 
-    console.log(`🍕 Adding ${restaurants.length} restaurants to map`);
-
-    // Create cluster group with our styling
+    // Create cluster group with our styling - disable auto-zoom behavior
     const clusterGroup = L.markerClusterGroup({
-      maxClusterRadius: 50 // Reasonable clustering distance
+      maxClusterRadius: 50, // Reasonable clustering distance
+      zoomToBoundsOnClick: true, // Only zoom when clicking cluster, not on add
+      spiderfyOnMaxZoom: true,
+      showCoverageOnHover: false,
+      disableClusteringAtZoom: 18
     });
 
-    // Add each restaurant as a marker
+    // Add each restaurant as a marker to the cluster group FIRST (before adding to map)
     let validRestaurants = 0;
+    const markers: L.Marker[] = [];
+    
     restaurants.forEach((restaurant) => {
       const { latitude, longitude } = restaurant.coordinates;
       
@@ -295,7 +260,6 @@ export default function CityMapCore({
           latitude < -90 || latitude > 90 || 
           longitude < -180 || longitude > 180 ||
           isNaN(latitude) || isNaN(longitude)) {
-        console.warn(`❌ Invalid coordinates for ${restaurant.name}: [${latitude}, ${longitude}]`);
         return;
       }
 
@@ -310,19 +274,37 @@ export default function CityMapCore({
             </div>
           `);
         
+        markers.push(marker);
         clusterGroup.addLayer(marker);
         validRestaurants++;
       } catch (error) {
-        console.warn(`❌ Error creating marker for ${restaurant.name}:`, error);
+        console.error(`Error creating marker for ${restaurant.name}:`, error);
       }
     });
 
     if (validRestaurants > 0) {
+      // Temporarily disable map movement events
+      map.dragging.disable();
+      map.touchZoom.disable();
+      map.doubleClickZoom.disable();
+      map.scrollWheelZoom.disable();
+      map.boxZoom.disable();
+      map.keyboard.disable();
+      
+      // Add cluster group to map
       map.addLayer(clusterGroup);
       restaurantLayerRef.current = clusterGroup;
-      console.log(`✅ Added ${validRestaurants} restaurant markers to map`);
-    } else {
-      console.warn(`⚠️ No valid restaurants to display`);
+      
+      // IMMEDIATELY restore the previous view (this prevents auto-zoom)
+      map.setView(currentCenter, currentZoom, { animate: false });
+      
+      // Re-enable map interactions
+      map.dragging.enable();
+      map.touchZoom.enable();
+      map.doubleClickZoom.enable();
+      map.scrollWheelZoom.enable();
+      map.boxZoom.enable();
+      map.keyboard.enable();
     }
 
   }, [showRestaurants, restaurants]);

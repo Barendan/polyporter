@@ -1,6 +1,6 @@
 'use client';
 
-import { EnhancedCityResponse } from '@/lib/geo';
+import type { EnhancedCityResponse } from '@/lib/geography/cityTypes';
 
 interface MapControlsProps {
   cityData: EnhancedCityResponse | null;
@@ -28,79 +28,64 @@ export default function MapControls({
   if (!cityData) return null;
 
   return (
-    <>
-      {/* Layer Controls */}
-      <div className="flex flex-wrap gap-3 p-3 bg-gray-50 rounded-lg border">
-        <label className="flex items-center space-x-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={showBuffered}
-            onChange={onToggleBuffered}
-            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-          />
-          <span className="text-sm font-medium text-gray-700">
-            Show Buffered Area (1km)
-          </span>
-        </label>
-        
-        <label className="flex items-center space-x-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={showH3Grid}
-            onChange={onToggleH3Grid}
-            className="rounded border-gray-300 text-green-600 focus:ring-green-500"
-          />
-          <span className="text-sm font-medium text-gray-700">
-            Show H3 Grid ({cityData.grid_stats.total_hexagons} hexagons)
-          </span>
-        </label>
-        
-        <label className="flex items-center space-x-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={showHexagonNumbers}
-            onChange={onToggleHexagonNumbers}
-            className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
-          />
-          <span className="text-sm font-medium text-gray-700">
-            Show Hexagon Numbers
-          </span>
-        </label>
-        
-        <label className="flex items-center space-x-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={showRestaurants}
-            onChange={onToggleRestaurants}
-            className="rounded border-gray-300 text-red-600 focus:ring-red-500"
-          />
-          <span className="text-sm font-medium text-gray-700">
-            🍕 Show Restaurants
-          </span>
-        </label>
-      </div>
-      
-      {/* Legend */}
-      <div className="flex flex-wrap gap-4 text-xs text-gray-600">
-        <div className="flex items-center space-x-2">
+    <div className="flex flex-wrap items-center gap-4 p-3 bg-gray-50 rounded-lg border">
+      {/* Clickable Legend Items */}
+      <div className="flex flex-wrap gap-4 text-xs">
+        {/* City Boundary - Always visible, not toggleable */}
+        <div className="flex items-center space-x-2 text-gray-600">
           <div className="w-4 h-4 bg-blue-600 rounded opacity-80"></div>
           <span>City Boundary</span>
         </div>
-        <div className="flex items-center space-x-2">
-          <div className="w-4 h-4 bg-purple-600 rounded opacity-60"></div>
-          <span>Buffered Area (1km)</span>
-        </div>
-        <div className="flex items-center space-x-2">
-          <div className="w-4 h-4 bg-green-600 rounded opacity-40"></div>
-          <span>H3 Grid (Resolution 7)</span>
-        </div>
-        {showHexagonNumbers && (
-          <div className="flex items-center space-x-2">
-            <div className="w-4 h-4 bg-orange-600 rounded-full border-2 border-green-600"></div>
-            <span>Hexagon Numbers</span>
-          </div>
-        )}
+        
+        {/* Buffered Area - Clickable */}
+        <button
+          onClick={onToggleBuffered}
+          className={`flex items-center space-x-2 transition-opacity ${
+            showBuffered ? 'opacity-100' : 'opacity-50'
+          } hover:opacity-100 cursor-pointer`}
+        >
+          <div className={`w-4 h-4 bg-purple-600 rounded ${showBuffered ? 'opacity-60' : 'opacity-30'}`}></div>
+          <span className="text-gray-700 font-medium">Buffered Area (1km)</span>
+          {showBuffered && <span className="text-purple-600">✓</span>}
+        </button>
+        
+        {/* H3 Grid - Clickable */}
+        <button
+          onClick={onToggleH3Grid}
+          className={`flex items-center space-x-2 transition-opacity ${
+            showH3Grid ? 'opacity-100' : 'opacity-50'
+          } hover:opacity-100 cursor-pointer`}
+        >
+          <div className={`w-4 h-4 bg-green-600 rounded ${showH3Grid ? 'opacity-40' : 'opacity-20'}`}></div>
+          <span className="text-gray-700 font-medium">H3 Grid ({cityData.grid_stats.total_hexagons} hexs)</span>
+          {showH3Grid && <span className="text-green-600">✓</span>}
+        </button>
+        
+        {/* Hexagon Numbers - Clickable */}
+        <button
+          onClick={onToggleHexagonNumbers}
+          className={`flex items-center space-x-2 transition-opacity ${
+            showHexagonNumbers ? 'opacity-100' : 'opacity-50'
+          } hover:opacity-100 cursor-pointer`}
+        >
+          <div className={`w-4 h-4 bg-white-600 rounded-full border-2 ${showHexagonNumbers ? 'border-green-600' : 'border-gray-400'}`}></div>
+          <span className="text-gray-700 font-medium">Hexagon Numbers</span>
+          {showHexagonNumbers && <span className="text-orange-600">✓</span>}
+        </button>
+        
+        {/* Restaurants - Clickable */}
+        <button
+          onClick={onToggleRestaurants}
+          className={`flex items-center space-x-2 transition-opacity ${
+            showRestaurants ? 'opacity-100' : 'opacity-50'
+          } hover:opacity-100 cursor-pointer`}
+        >
+          <div className={`w-4 h-4 bg-red-600 rounded ${showRestaurants ? 'opacity-80' : 'opacity-30'}`}></div>
+          <span className="text-gray-700 font-medium">Restaurants</span>
+          {showRestaurants && <span className="text-red-600">✓</span>}
+        </button>
       </div>
-    </>
+      
+    </div>
   );
 }

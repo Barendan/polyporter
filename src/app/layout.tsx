@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "City Polygon Viewer",
+  title: "Rylon1",
   description: "View city boundaries from OpenStreetMap",
 };
 

@@ -36,3 +36,66 @@ body {
   user-select: none;
   z-index: 1000;
 }
+
+/* Loading modal animations */
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.animate-shimmer {
+  animation: shimmer 2s infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes zoom-in-95 {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-in {
+  animation-fill-mode: both;
+}
+
+.fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+.zoom-in-95 {
+  animation: zoom-in-95 0.3s ease-out;
+}
+
+/* Ensure Yelp loader modal appears above Leaflet maps */
+/* Leaflet maps typically use z-index 200-1000, so we use much higher */
+.yelp-loader-backdrop {
+  z-index: 9999 !important;
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+}
+
+.yelp-loader-modal {
+  z-index: 10000 !important;
+  position: relative !important;
+}
+

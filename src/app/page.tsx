@@ -1,9 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import dynamic from 'next/dynamic';
-import { EnhancedCityResponse } from '@/lib/geo';
+import type { EnhancedCityResponse } from '@/lib/geography/cityTypes';
+import LoadingModal from '../components/LoadingModal';
 
 // Dynamically import the map component to avoid SSR issues
 const CityMap = dynamic(() => import('../components/CityMap/index'), { ssr: false });
@@ -12,27 +13,69 @@ interface FormData {
   cityName: string;
 }
 
+const LOADING_STEPS = [
+  'Searching for city boundary...',
+  'Processing city data...',
+  'Generating hexagon grid...',
+  'Finalizing map...'
+];
+
 export default function Home() {
   const [cityData, setCityData] = useState<EnhancedCityResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingStep, setLoadingStep] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<string | null>(null);
 
   const { register, handleSubmit, formState: { errors } } = useForm<FormData>();
 
+  // Simulate progress steps during loading
+  useEffect(() => {
+    if (!loading) {
+      setLoadingStep(1);
+      return;
+    }
+
+    // Progress through steps with timing
+    const stepTimers: NodeJS.Timeout[] = [];
+    
+    // Step 1: Start immediately
+    // Step 2: After 0.5s
+    stepTimers.push(setTimeout(() => setLoadingStep(2), 500));
+    // Step 3: After 1.5s
+    stepTimers.push(setTimeout(() => setLoadingStep(3), 1500));
+    // Step 4: After 2.5s (will be overridden when API completes)
+    stepTimers.push(setTimeout(() => setLoadingStep(4), 2500));
+
+    return () => {
+      stepTimers.forEach(timer => clearTimeout(timer));
+    };
+  }, [loading]);
+
   const onSubmit = async (data: FormData) => {
     setLoading(true);
+    setLoadingStep(1);
     setError(null);
     setStats(null);
 
     try {
+      // Step 1: Searching
+      setLoadingStep(1);
+      
       const response = await fetch(`/api/city?name=${encodeURIComponent(data.cityName)}`);
+      
+      // Step 2: Processing
+      setLoadingStep(2);
+      
       const result = await response.json();
 
       if (!response.ok) {
         throw new Error(result.error || 'Failed to fetch city data');
       }
 
+      // Step 3: Generating grid
+      setLoadingStep(3);
+      
       setCityData(result);
       
       // Calculate enhanced stats
@@ -51,22 +94,37 @@ export default function Home() {
       const enhancedStats = `${ringCount} polygon ring${ringCount !== 1 ? 's' : ''} rendered via ${result.source} | ${gridStats.total_hexagons} H3 hexagons (${gridStats.coverage_area_km2.toFixed(1)} km² coverage)`;
       
       setStats(enhancedStats);
+      
+      // Step 4: Finalizing
+      setLoadingStep(4);
+      
+      // Small delay before closing to show completion
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An unexpected error occurred');
     } finally {
       setLoading(false);
+      setLoadingStep(1);
     }
   };
 
   return (
     <div className="min-h-screen bg-gray-50 p-4">
+      <LoadingModal 
+        isOpen={loading}
+        currentStep={loadingStep}
+        totalSteps={LOADING_STEPS.length}
+        stepLabels={LOADING_STEPS}
+      />
+      
       <div className="max-w-4xl mx-auto">
         <header className="text-center mb-8">
           <h1 className="text-3xl font-bold text-gray-900 mb-2">
-            City Polygon Viewer
+            Rylon1
           </h1>
           <p className="text-gray-600">
-            View precise city boundaries from OpenStreetMap
+            View precise restaurant locations in a city
           </p>
         </header>
 
@@ -100,11 +158,6 @@ export default function Home() {
           </div>
         )}
 
-        {stats && (
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-6">
-            <p className="text-blue-800 text-sm">{stats}</p>
-          </div>
-        )}
 
         {/* Enhanced Grid Statistics */}
         {cityData && cityData.grid_stats && (
@@ -133,12 +186,7 @@ export default function Home() {
                 <div className="text-sm text-green-700">Coverage Area (km²)</div>
               </div>
             </div>
-            <div className="mt-3 text-xs text-green-600 text-center">
-              Buffer: 1km | Grid ensures edge-case businesses aren't missed
-            </div>
-            <div className="mt-2 text-xs text-green-500 text-center">
-              💡 Resolution 7 hexagons (~4.8 km²) will subdivide to Resolution 8 if density &gt; 240 businesses
-            </div>
+           
           </div>
         )}
 

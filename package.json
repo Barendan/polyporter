@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.81.1",
     "@turf/turf": "^7.2.0",
     "@types/geojson": "^7946.0.16",
     "@types/leaflet": "^1.9.20",

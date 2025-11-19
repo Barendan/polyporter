@@ -1,13 +1,13 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useCallback, useMemo } from 'react';
 import L from 'leaflet';
-import { EnhancedCityResponse } from '@/lib/geo';
-import type { YelpBusiness } from '@/lib/yelpSearch';
+import type { EnhancedCityResponse } from '@/lib/geography/cityTypes';
+import type { YelpBusiness } from '@/lib/yelp/search';
 import CityMapCore from './CityMapCore';
 import MapControls from './MapControls';
 import YelpIntegration from './YelpIntegration';
-import HexagonDisplay from './HexagonDisplay';
+import RestaurantReviewPanel from './RestaurantReviewPanel';
 
 // Define interfaces for Yelp testing state
 interface Restaurant {
@@ -43,9 +43,12 @@ interface HexagonResult {
 interface YelpTestResult {
   success?: boolean;
   results?: HexagonResult[];
+  newBusinesses?: Restaurant[]; // Only new restaurants added to staging
   testMode?: boolean;
   processedAt?: string;
   error?: string;
+  importLogId?: string | null; // Import log ID for tracking approved restaurants
+  cityId?: string | null; // City ID for creating staging records
   processingStats?: {
     totalHexagons: number;
     processedHexagons: number;
@@ -53,6 +56,10 @@ interface YelpTestResult {
     failedHexagons: number;
     limitedHexagons: number;
     totalRequested: number;
+    restaurantsFetched?: number;
+    duplicatesSkipped?: number;
+    validationErrors?: number;
+    newRestaurantsCount?: number;
   };
 }
 
@@ -72,10 +79,10 @@ export default function CityMap({ cityData }: CityMapProps) {
   // Yelp testing state
   const [yelpResults, setYelpResults] = useState<YelpTestResult | null>(null);
 
-  // Map ready callback
-  const handleMapReady = (map: L.Map) => {
+  // Map ready callback - MUST be memoized to prevent map destruction
+  const handleMapReady = useCallback((map: L.Map) => {
     mapRef.current = map;
-  };
+  }, []); // Empty deps - this function never changes
 
   // Toggle layer visibility
   const toggleBuffered = () => {
@@ -94,8 +101,8 @@ export default function CityMap({ cityData }: CityMapProps) {
     setShowRestaurants(!showRestaurants);
   };
 
-  // Get all unique restaurants from Yelp results
-  const getAllRestaurants = (): YelpBusiness[] => {
+  // Get all unique restaurants from Yelp results - memoized to prevent unnecessary re-renders
+  const allRestaurants = useMemo((): YelpBusiness[] => {
     if (!yelpResults?.results) return [];
     const allBusinesses = yelpResults.results.flatMap(result => result.uniqueBusinesses || []);
     
@@ -108,16 +115,123 @@ export default function CityMap({ cityData }: CityMapProps) {
     });
     
     return Array.from(uniqueMap.values());
-  };
+  }, [yelpResults?.results]); // Only recalculate when yelpResults changes
 
   // Handle Yelp results update
   const handleYelpResultsUpdate = (results: YelpTestResult) => {
     setYelpResults(results);
   };
 
+  // Recenter map on city boundary
+  const recenterMap = () => {
+    if (!mapRef.current || !cityData) return;
+    
+    const map = mapRef.current;
+    // Create a temporary layer to get bounds from the city geojson
+    const tempLayer = L.geoJSON(cityData.geojson);
+    const bounds = tempLayer.getBounds();
+    
+    if (bounds.isValid()) {
+      // Invalidate size first to ensure map dimensions are correct
+      map.invalidateSize();
+      
+      // Fit bounds to city
+      map.fitBounds(bounds, {
+        padding: [24, 24],
+        maxZoom: 18
+      });
+      
+      // Force a complete refresh after the view change
+      // This ensures all layers (H3 grid, boundaries, etc.) are properly redrawn
+      setTimeout(() => {
+        // Invalidate size again after view change
+        map.invalidateSize();
+        
+        // Force redraw by temporarily toggling zoom (triggers layer refresh)
+        const currentZoom = map.getZoom();
+        map.setZoom(currentZoom);
+        
+        // Ensure all canvas-based layers refresh
+        map.eachLayer((layer) => {
+          // For GeoJSON layers
+          if (layer instanceof L.GeoJSON) {
+            layer.eachLayer((featureLayer) => {
+              if (featureLayer instanceof L.Path) {
+                featureLayer.redraw();
+              }
+            });
+          }
+          // For LayerGroups (like H3 grid)
+          if (layer instanceof L.LayerGroup) {
+            layer.eachLayer((sublayer) => {
+              if (sublayer instanceof L.Path) {
+                sublayer.redraw();
+              }
+              // Markers don't need explicit update - they refresh automatically
+            });
+          }
+          // For direct Path layers
+          if (layer instanceof L.Path) {
+            layer.redraw();
+          }
+        });
+      }, 150);
+    }
+  };
+
   return (
     <div className="space-y-4">
-      {/* Layer Controls */}
+      {/* Map Container - First, at the top */}
+      <div 
+        className="relative w-full h-96 rounded-lg overflow-hidden border border-gray-200 bg-gray-100"
+        style={{ minHeight: '384px' }}
+      >
+        <div 
+          id="map" 
+          className="w-full h-full"
+        />
+        {/* Recenter Button - Overlay on map */}
+        {cityData && (
+          <button
+            onClick={recenterMap}
+            className="absolute top-4 right-4 bg-white hover:bg-gray-50 border border-gray-300 rounded shadow-md p-2 transition-all duration-200 hover:shadow-lg z-[1000] flex items-center justify-center"
+            title="Recenter map on city boundary"
+            style={{
+              boxShadow: '0 1px 5px rgba(0,0,0,0.4)'
+            }}
+          >
+            <svg 
+              width="20" 
+              height="20" 
+              viewBox="0 0 24 24" 
+              fill="none" 
+              stroke="currentColor" 
+              strokeWidth="2" 
+              strokeLinecap="round" 
+              strokeLinejoin="round"
+              className="text-gray-700"
+            >
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+              <path d="M3 21v-5h5" />
+            </svg>
+          </button>
+        )}
+      </div>
+      
+      {/* Map Core Component (handles map logic) */}
+      <CityMapCore
+        cityData={cityData}
+        showBuffered={showBuffered}
+        showH3Grid={showH3Grid}
+        showHexagonNumbers={showHexagonNumbers}
+        showRestaurants={showRestaurants}
+        restaurants={allRestaurants}
+        onMapReady={handleMapReady}
+      />
+
+      {/* Layer Controls - Below the map */}
       <MapControls
         cityData={cityData}
         showBuffered={showBuffered}
@@ -129,41 +243,16 @@ export default function CityMap({ cityData }: CityMapProps) {
         onToggleHexagonNumbers={toggleHexagonNumbers}
         onToggleRestaurants={toggleRestaurants}
       />
-      
-      {/* Map Container */}
-      <div 
-        id="map" 
-        className="w-full h-96 rounded-lg overflow-hidden border border-gray-200 bg-gray-100"
-        style={{ minHeight: '384px' }}
-      />
-      
-      {/* Map Core Component (handles map logic) */}
-      <CityMapCore
-        cityData={cityData}
-        showBuffered={showBuffered}
-        showH3Grid={showH3Grid}
-        showHexagonNumbers={showHexagonNumbers}
-        showRestaurants={showRestaurants}
-        restaurants={getAllRestaurants()}
-        onMapReady={handleMapReady}
-      />
 
-      {/* Yelp Integration */}
+      {/* Yelp Integration - Below controls */}
       <YelpIntegration
         cityData={cityData}
         onResultsUpdate={handleYelpResultsUpdate}
       />
 
-      {/* Hexagon Display Showcase */}
-      <HexagonDisplay yelpResults={yelpResults} />
+      {/* Restaurant Review Panel */}
+      <RestaurantReviewPanel yelpResults={yelpResults} />
 
-      {/* City Info Display */}
-      {cityData && (
-        <div className="mt-4 text-center text-sm text-gray-600">
-          <p>Showing: <strong>{cityData.name}</strong> (OSM ID: {cityData.osm_id})</p>
-          <p className="text-xs text-gray-500 mt-1">Data source: {cityData.source}</p>
-        </div>
-      )}
     </div>
   );
 }
