@@ -142,7 +142,7 @@ export default function Home() {
       <div className="max-w-4xl mx-auto">
         <header className="text-center mb-4">
           <h1 className="text-3xl font-bold text-gray-900">
-            Restaurant Intelligence Project
+            Restaurant Data Mainframe
           </h1>
           <p className="text-gray-600">
             Find, process, and review restaurants in any city.

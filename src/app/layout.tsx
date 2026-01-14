@@ -16,8 +16,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Rylon1",
-  description: "View city boundaries from OpenStreetMap",
+  title: "Polyporter",
+  description: "Platform for collecting restaurant data",
 };
 
 export default function RootLayout({
