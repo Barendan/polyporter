@@ -321,7 +321,7 @@ export default function CityMap({ cityData, onRestaurantDataChange }: CityMapPro
       />
 
       {/* Restaurant Review Panel */}
-      <RestaurantReviewPanel yelpResults={yelpResults} />
+      <RestaurantReviewPanel yelpResults={yelpResults} cityName={cityData?.name} />
 
     </div>
   );

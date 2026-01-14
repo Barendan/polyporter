@@ -124,7 +124,9 @@ export interface EnhancedCityResponse extends CityResponse {
   buffered_polygon: Feature<Polygon | MultiPolygon>;
   h3_grid: string[];
   grid_stats: GridStats;
-  city_id?: string; // City UUID for cache operations
+  city_id: string | null; // City UUID for cache operations (always present, null if not cached)
+  city_query: string; // City query string in "City, ST" format (e.g., "Kendall, FL")
+  traceId?: string; // Optional request/response trace identifier for debugging
   cachedRestaurantData?: { // Metadata about cached restaurant data
     available: boolean;
     count: number;

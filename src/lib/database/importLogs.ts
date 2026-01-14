@@ -4,44 +4,45 @@ import type { YelpImportLog, YelpImportStatus } from '../types';
 
 export interface CreateImportLogInput {
   city_id?: string;
-  total_tiles: number;
+  total_tiles: number;                   // Original city hexagon count
   estimated_api_calls: number;
-  test_mode?: boolean;
 }
 
 export interface UpdateImportLogInput {
   status?: YelpImportStatus;
   processed_tiles?: number;
+  tiles_cached?: number;                 // Renamed from tiles_skipped
   actual_api_calls?: number;
-  restaurants_added?: number;
-  tiles_skipped?: number;
-  tiles_fetched?: number;
   restaurants_fetched?: number;
-  end_time?: string;
+  restaurants_unique?: number;
+  restaurants_staged?: number;
+  validation_failures?: number;
+  duplicates_existing?: number;
+  restaurants_approved?: number;
 }
 
 /**
  * Create a new import log
  * Returns the import log ID, or null on error
- * Note: user_id is set to null as per requirements (no user tracking)
  */
 export async function createImportLog(logData: CreateImportLogInput): Promise<string | null> {
   try {
     const { data, error } = await supabaseServer
       .from('yelp_import_logs')
       .insert({
-        user_id: null, // No user tracking as per requirements
         city_id: logData.city_id,
         total_tiles: logData.total_tiles,
         estimated_api_calls: logData.estimated_api_calls,
         status: 'running',
         processed_tiles: 0,
+        tiles_cached: 0,
         actual_api_calls: 0,
-        restaurants_added: 0,
-        tiles_skipped: 0,
-        tiles_fetched: 0,
         restaurants_fetched: 0,
-        start_time: new Date().toISOString()
+        restaurants_unique: 0,
+        restaurants_staged: 0,
+        validation_failures: 0,
+        duplicates_existing: 0,
+        restaurants_approved: 0,
       })
       .select('id')
       .single();
@@ -78,11 +79,6 @@ export async function updateImportLog(
 ): Promise<boolean> {
   try {
     const updateData: Record<string, unknown> = { ...updates };
-    
-    // If status is being updated to complete or failed, set end_time
-    if (updates.status === 'complete' || updates.status === 'failed') {
-      updateData.end_time = new Date().toISOString();
-    }
 
     const { error } = await supabaseServer
       .from('yelp_import_logs')
@@ -109,6 +105,153 @@ export async function updateImportLog(
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined
     });
+    return false;
+  }
+}
+
+/**
+ * Increment the approved count for an import log
+ * Used when admin approves restaurants
+ */
+export async function incrementApprovedCount(
+  logId: string,
+  count: number
+): Promise<boolean> {
+  try {
+    const { data: current } = await supabaseServer
+      .from('yelp_import_logs')
+      .select('restaurants_approved')
+      .eq('id', logId)
+      .single();
+
+    if (!current) {
+      console.error('❌ Import log not found for increment:', logId);
+      return false;
+    }
+
+    const { error } = await supabaseServer
+      .from('yelp_import_logs')
+      .update({ restaurants_approved: (current.restaurants_approved || 0) + count })
+      .eq('id', logId);
+
+    if (error) {
+      console.error('❌ Error incrementing approved count:', error);
+      return false;
+    }
+
+    console.log(`✅ Incremented approved count by ${count} for import log: ${logId}`);
+    return true;
+  } catch (error) {
+    console.error('❌ Exception incrementing approved count:', error);
+    return false;
+  }
+}
+
+/**
+ * Increment the staged count for an import log
+ * Used when restaurants are saved to staging
+ */
+export async function incrementStagedCount(
+  logId: string,
+  count: number
+): Promise<boolean> {
+  try {
+    const { data: current } = await supabaseServer
+      .from('yelp_import_logs')
+      .select('restaurants_staged')
+      .eq('id', logId)
+      .single();
+
+    if (!current) {
+      console.error('❌ Import log not found for increment staged count:', logId);
+      return false;
+    }
+
+    const { error } = await supabaseServer
+      .from('yelp_import_logs')
+      .update({ restaurants_staged: (current.restaurants_staged || 0) + count })
+      .eq('id', logId);
+
+    if (error) {
+      console.error('❌ Error incrementing staged count:', error);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error('❌ Exception incrementing staged count:', error);
+    return false;
+  }
+}
+
+/**
+ * Increment the duplicates count for an import log
+ */
+export async function incrementDuplicatesCount(
+  logId: string,
+  count: number
+): Promise<boolean> {
+  try {
+    const { data: current } = await supabaseServer
+      .from('yelp_import_logs')
+      .select('duplicates_existing')
+      .eq('id', logId)
+      .single();
+
+    if (!current) {
+      console.error('❌ Import log not found for increment duplicates count:', logId);
+      return false;
+    }
+
+    const { error } = await supabaseServer
+      .from('yelp_import_logs')
+      .update({ duplicates_existing: (current.duplicates_existing || 0) + count })
+      .eq('id', logId);
+
+    if (error) {
+      console.error('❌ Error incrementing duplicates count:', error);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error('❌ Exception incrementing duplicates count:', error);
+    return false;
+  }
+}
+
+/**
+ * Increment the validation failures count for an import log
+ */
+export async function incrementValidationFailuresCount(
+  logId: string,
+  count: number
+): Promise<boolean> {
+  try {
+    const { data: current } = await supabaseServer
+      .from('yelp_import_logs')
+      .select('validation_failures')
+      .eq('id', logId)
+      .single();
+
+    if (!current) {
+      console.error('❌ Import log not found for increment validation failures count:', logId);
+      return false;
+    }
+
+    const { error } = await supabaseServer
+      .from('yelp_import_logs')
+      .update({ validation_failures: (current.validation_failures || 0) + count })
+      .eq('id', logId);
+
+    if (error) {
+      console.error('❌ Error incrementing validation failures count:', error);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error('❌ Exception incrementing validation failures count:', error);
     return false;
   }
 }
@@ -160,4 +303,3 @@ export async function getImportLogsByCity(cityId: string): Promise<YelpImportLog
     return [];
   }
 }
-

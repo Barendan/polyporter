@@ -3,9 +3,10 @@ import { YelpSearchEngine, type HexagonYelpResult } from '@/lib/yelp/search';
 import { hexagonProcessor } from '@/lib/hexagons/processor';
 import { yelpQuotaManager } from '@/lib/utils/quotaManager';
 import { getCityByName } from '@/lib/database/cities';
+import { supabaseServer } from '@/lib/config/supabaseServer';
 import { getValidHextile, upsertHextile, getHextileCenter } from '@/lib/database/hextiles';
 import { createImportLog, updateImportLog } from '@/lib/database/importLogs';
-import { parseCityInput } from '@/lib/database/cityConverter';
+import { parseCityInput } from '@/lib/utils/cityNormalizer';
 import { getStagingBusinessesAsYelpBusinesses } from '@/lib/database/yelpStaging';
 import { processingStates, type ProcessingState } from './state';
 import * as h3 from 'h3-js';
@@ -20,9 +21,11 @@ const yelpEngine = new YelpSearchEngine(process.env.YELP_API_KEY || 'demo-key');
 export async function processHexagons(
   hexagons: string[] | Array<{ h3Id: string; mapIndex: number; originalIndex: number }>, 
   testMode: boolean = false,
-  cityName?: string
+  cityName?: string,
+  city_id?: string
 ): Promise<NextResponse> {
   try {
+    console.log('[processHexagons] start', { city_id, cityName });
     if (!hexagons || hexagons.length === 0) {
       return NextResponse.json(
         { error: 'No hexagons provided' },
@@ -30,44 +33,69 @@ export async function processHexagons(
       );
     }
 
-    // Get city_id from cityName if provided (for database tracking)
+    // PRIMARY: Use city_id if provided (this prevents the duplicate issue)
     let cityId: string | null = null;
-    if (cityName) {
+    
+    if (city_id) {
+      // Validate city_id exists
+      const { data: city, error: cityError } = await supabaseServer
+        .from('cities')
+        .select('id')
+        .eq('id', city_id)
+        .single();
+      
+      if (city && !cityError) {
+        cityId = city_id;
+        console.log('[processHexagons] city_id validation', {
+          city_id,
+          cityIdResolved: cityId
+        });
+      } else {
+        console.warn('[processHexagons] invalid city_id, falling back', { city_id, cityError });
+      }
+    }
+    
+    // FALLBACK: Read-only lookup (DO NOT CREATE) - only for backward compatibility
+    // This prevents the "Doral Miami-dade County" duplicate bug
+    if (!cityId && cityName) {
       try {
-        const parsed = parseCityInput(cityName);
-        if (parsed) {
-          let city = await getCityByName(parsed.cityName, parsed.state);
-          if (city) {
-            cityId = city.id;
-            console.log(`✅ Found city in database: ${parsed.cityName}, ${parsed.state} (ID: ${cityId})`);
-          } else {
-            // City doesn't exist - try to create it
-            console.log(`⚠️ City not found in database: ${parsed.cityName}, ${parsed.state} - attempting to create...`);
-            const { createCity } = await import('@/lib/database/cities');
-            const newCityId = await createCity({
-              name: parsed.cityName,
-              state: parsed.state,
-              country: 'USA'
-            });
-            if (newCityId) {
-              cityId = newCityId;
-              console.log(`✅ Created new city in database: ${parsed.cityName}, ${parsed.state} (ID: ${cityId})`);
-            } else {
-              console.error(`❌ Failed to create city in database: ${parsed.cityName}, ${parsed.state} - import logs and staging will be skipped`);
-            }
-          }
+        // Guard: Only accept "City, ST" format (prevents display_name parsing)
+        const trimmed = cityName.trim();
+        const isValidFormat = /,\s*[A-Z]{2}$/.test(trimmed);
+
+        console.log('[processHexagons] fallback check', {
+          cityName: trimmed,
+          isValidFormat
+        });
+        
+        if (!isValidFormat) {
+          console.warn(`⚠️ Rejecting invalid cityName format: "${trimmed}". Expected format: "City, ST"`);
         } else {
-          console.warn(`⚠️ Could not parse city name: "${cityName}" - import logs and staging will be skipped`);
+          const parsed = parseCityInput(trimmed);
+          if (parsed) {
+            // READ-ONLY: Only lookup, never create
+            const city = await getCityByName(parsed.cityName, parsed.state);
+            if (city) {
+              cityId = city.id;
+              console.log(`✅ Found city via read-only name lookup: ${parsed.cityName}, ${parsed.state} (ID: ${cityId})`);
+            } else {
+              // City doesn't exist - FAIL instead of creating (prevents duplicate bug)
+              console.error(`❌ City not found via name lookup: ${parsed.cityName}, ${parsed.state}. city_id is required for new cities. Import logs and staging will be skipped.`);
+              // Don't create - this prevents the duplicate bug
+            }
+          } else {
+            console.warn(`⚠️ Could not parse city name: "${trimmed}" - import logs and staging will be skipped`);
+          }
         }
       } catch (dbError) {
         // Graceful degradation: continue without city_id if lookup fails
-        console.error('❌ Error getting/creating city_id for import log (non-fatal, but import logs and staging will be skipped):', {
+        console.error('❌ Error looking up city (non-fatal):', {
           error: dbError instanceof Error ? dbError.message : String(dbError),
           cityName
         });
       }
-    } else {
-      console.warn('⚠️ No cityName provided - import logs and staging will be skipped');
+    } else if (!cityId) {
+      console.warn('⚠️ No city_id provided - import logs and staging will be skipped');
     }
 
     // Check quota before processing
@@ -115,6 +143,9 @@ export async function processHexagons(
       }
     }
     
+    // FIX: Capture original count BEFORE slicing for test mode
+    const originalTotalHexagons = hexagonsToProcess.length;
+    
     if (testMode) {
       // Test mode: use real Yelp API calls on limited hexagons
       const maxTestHexagons = 5; // Strict limit for testing
@@ -122,30 +153,29 @@ export async function processHexagons(
       hexagonIndices = hexagonIndices.slice(0, maxTestHexagons);
     }
     
-    // Store total for progress tracking
-    const totalHexagons = hexagonsToProcess.length;
+    // Store count of hexagons we'll actually process this run
+    const hexagonsToProcessCount = hexagonsToProcess.length;
     const processId = `process_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
     // Create import log for tracking (graceful degradation - continue if this fails)
     let importLogId: string | null = null;
     let actualApiCalls = 0;
-    let tilesSkipped = 0;
+    let tilesCached = 0;  // Renamed from tilesSkipped for clarity
     let tilesFetched = 0;
     let restaurantsFetched = 0;
     const allNewBusinesses: any[] = []; // Track all new businesses across all hexagons
     
     if (cityId) {
       try {
-        const estimatedCalls = Math.ceil(totalHexagons * 3 * 1.5); // Estimate based on hexagon count
-        console.log(`📝 Attempting to create import log for city ${cityId} with ${totalHexagons} hexagons...`);
+        const estimatedCalls = Math.ceil(hexagonsToProcessCount * 3 * 1.5); // Estimate based on hexagon count
+        console.log(`📝 Attempting to create import log for city ${cityId} with ${originalTotalHexagons} total hexagons (processing ${hexagonsToProcessCount})...`);
         importLogId = await createImportLog({
           city_id: cityId,
-          total_tiles: totalHexagons,
+          total_tiles: originalTotalHexagons,  // FIX: Use original count, not sliced count
           estimated_api_calls: estimatedCalls,
-          test_mode: testMode
         });
         if (importLogId) {
-          console.log(`✅ Created import log ${importLogId} for ${totalHexagons} hexagons`);
+          console.log(`✅ Created import log ${importLogId} for ${originalTotalHexagons} hexagons`);
         } else {
           console.error(`❌ Failed to create import log - function returned null (check database connection)`);
         }
@@ -162,11 +192,11 @@ export async function processHexagons(
     
     // Initialize processing state
     // Estimate total API calls: ~3 per hexagon (3 search points per hexagon)
-    const estimatedTotalApiCalls = totalHexagons * 3;
+    const estimatedTotalApiCalls = hexagonsToProcessCount * 3;
     const processingState: ProcessingState = {
-      totalHexagons,
+      totalHexagons: hexagonsToProcessCount,
       processedHexagons: 0,
-      phase1Total: totalHexagons,
+      phase1Total: hexagonsToProcessCount,
       phase1Processed: 0,
       phase2Total: 0,
       phase2Processed: 0,
@@ -217,7 +247,7 @@ export async function processHexagons(
                     coverageQuality: 'cached'
                   };
                   fromCache = true;
-                  tilesSkipped++;
+                  tilesCached++;
                   console.log(`✅ Using cached data for hexagon ${h3Id} (${cachedBusinesses.length} businesses loaded from staging)`);
                 }
               }
@@ -282,9 +312,8 @@ export async function processHexagons(
             try {
               await updateImportLog(importLogId, {
                 processed_tiles: i + 1,
+                tiles_cached: tilesCached,
                 actual_api_calls: actualApiCalls,
-                tiles_skipped: tilesSkipped,
-                tiles_fetched: tilesFetched,
                 restaurants_fetched: restaurantsFetched
               });
             } catch (logError) {
@@ -334,7 +363,7 @@ export async function processHexagons(
       const subdivisionResults = await hexagonProcessor.processSubdivisionQueue();
       const subdivisionCount = subdivisionResults.length;
       processingState.phase2Total = subdivisionCount;
-      processingState.totalHexagons = totalHexagons + subdivisionCount;
+      processingState.totalHexagons = hexagonsToProcessCount + subdivisionCount;
       
       // Process subdivision hexagons with Yelp
       const phase2Results: HexagonYelpResult[] = [];
@@ -366,7 +395,7 @@ export async function processHexagons(
                       coverageQuality: 'cached'
                     };
                     fromCache = true;
-                    tilesSkipped++;
+                    tilesCached++;
                     console.log(`✅ Using cached data for subdivision hexagon ${h3Id} (${cachedBusinesses.length} businesses loaded from staging)`);
                   }
                 }
@@ -416,9 +445,8 @@ export async function processHexagons(
               try {
                 await updateImportLog(importLogId, {
                   processed_tiles: processingState.phase1Processed + phase2Index,
+                  tiles_cached: tilesCached,
                   actual_api_calls: actualApiCalls,
-                  tiles_skipped: tilesSkipped,
-                  tiles_fetched: tilesFetched,
                   restaurants_fetched: restaurantsFetched
                 });
               } catch (logError) {
@@ -473,31 +501,6 @@ export async function processHexagons(
     // Mark processing as complete
     processingState.isProcessing = false;
     
-    // Update import log as complete (graceful degradation)
-    if (importLogId) {
-      try {
-        const totalProcessed = processingState.phase1Processed + processingState.phase2Processed;
-        const totalSkipped = tilesSkipped;
-        const totalFetched = tilesFetched;
-        
-        // Count total businesses saved to staging (approximate - actual count would require query)
-        // For now, use restaurants_fetched as approximation
-        await updateImportLog(importLogId, {
-          status: 'complete',
-          processed_tiles: totalProcessed,
-          actual_api_calls: actualApiCalls,
-          tiles_skipped: totalSkipped,
-          tiles_fetched: totalFetched,
-          restaurants_fetched: restaurantsFetched,
-          restaurants_added: restaurantsFetched, // Approximation - actual count would require querying staging table
-          end_time: new Date().toISOString()
-        });
-        console.log(`✅ Marked import log ${importLogId} as complete`);
-      } catch (logError) {
-        console.warn('Failed to mark import log as complete (non-fatal):', logError);
-      }
-    }
-    
     // Get comprehensive processing statistics and subdivision information
     const processingStats = hexagonProcessor.getProcessingStats();
     const quotaStatus = yelpQuotaManager.getQuotaStatus();
@@ -518,6 +521,25 @@ export async function processHexagons(
       }
     });
     const uniqueBusinesses = Array.from(uniqueBusinessesMap.values());
+    
+    // Update import log as complete with accurate counts (graceful degradation)
+    if (importLogId) {
+      try {
+        const totalProcessed = processingState.phase1Processed + processingState.phase2Processed;
+        
+        await updateImportLog(importLogId, {
+          status: 'complete',
+          processed_tiles: totalProcessed,
+          tiles_cached: tilesCached,
+          actual_api_calls: actualApiCalls,
+          restaurants_fetched: restaurantsFetched,
+          restaurants_unique: uniqueBusinesses.length,  // Accurate deduplicated count
+        });
+        console.log(`✅ Marked import log ${importLogId} as complete (${restaurantsFetched} fetched, ${uniqueBusinesses.length} unique)`);
+      } catch (logError) {
+        console.warn('Failed to mark import log as complete (non-fatal):', logError);
+      }
+    }
 
     return NextResponse.json({
       success: true,
@@ -542,7 +564,7 @@ export async function processHexagons(
       processedAt: new Date().toISOString(),
       // Include cache statistics
       cacheStats: {
-        tilesSkipped,
+        tilesCached,
         tilesFetched,
         actualApiCalls
       }
@@ -567,7 +589,6 @@ export async function processHexagons(
       try {
         await updateImportLog(importLogIdToFail, {
           status: 'failed',
-          end_time: new Date().toISOString()
         });
         console.log(`✅ Marked import log ${importLogIdToFail} as failed`);
       } catch (logError) {

@@ -31,7 +31,8 @@ export interface YelpHextile {
   status: YelpHextileStatus;
   center_lat: number;
   center_lng: number;
-  yelp_total_businesses?: number;
+  yelp_total_businesses?: number;  // Total found from Yelp (immutable after first set)
+  staged?: number;                 // Count of restaurants staged (increments)
   resolution: number;
   retry_count: number;
   created_at: string;
@@ -51,18 +52,25 @@ export interface YelpStaging {
 export interface YelpImportLog {
   id: string;
   status: YelpImportStatus;
-  user_id?: string;
-  total_tiles: number;
-  processed_tiles: number;
+  city_id?: string;
+  
+  // Tile metrics
+  total_tiles: number;                   // All hexagons in city (original count)
+  processed_tiles: number;               // How many processed this run
+  tiles_cached: number;                  // From cache (no API call needed)
+  
+  // API metrics
   estimated_api_calls: number;
   actual_api_calls: number;
-  restaurants_added: number;
-  city_id?: string;
-  start_time?: string;
-  end_time?: string;
-  tiles_skipped: number;
-  tiles_fetched: number;
-  restaurants_fetched: number;
+  
+  // Restaurant funnel metrics
+  restaurants_fetched: number;           // Raw from Yelp (with cross-hexagon dupes)
+  restaurants_unique: number;            // After cross-hexagon deduplication
+  restaurants_staged: number;            // Saved to staging table
+  validation_failures: number;           // Failed validation
+  duplicates_existing: number;           // Already in DB from previous imports
+  restaurants_approved: number;          // Admin approved
+  
   created_at: string;
   updated_at: string;
 }

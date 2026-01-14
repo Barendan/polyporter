@@ -10,13 +10,15 @@ export interface CreateHextileInput {
   center_lat: number;
   center_lng: number;
   yelp_total_businesses?: number;
+  staged?: number;  // NEW: Count of restaurants staged
   resolution: number;
   retry_count?: number;
 }
 
 export interface UpdateHextileInput {
   status?: YelpHextileStatus;
-  yelp_total_businesses?: number;
+  yelp_total_businesses?: number;  // Note: Should not be updated after initial creation
+  staged?: number;  // NEW: Allow staged to be updated
   retry_count?: number;
 }
 
@@ -90,9 +92,10 @@ export async function upsertHextile(hextileData: CreateHextileInput): Promise<st
     
     if (existing) {
       // Update existing hextile
+      // DO NOT update yelp_total_businesses - it's immutable after first set
       const updateData: UpdateHextileInput = {
         status: hextileData.status,
-        yelp_total_businesses: hextileData.yelp_total_businesses,
+        staged: hextileData.staged,  // Allow staged to be updated
         retry_count: hextileData.retry_count ?? existing.retry_count
       };
 
@@ -120,6 +123,7 @@ export async function upsertHextile(hextileData: CreateHextileInput): Promise<st
           center_lat: hextileData.center_lat,
           center_lng: hextileData.center_lng,
           yelp_total_businesses: hextileData.yelp_total_businesses,
+          staged: hextileData.staged ?? 0,  // Default to 0 if not provided
           resolution: hextileData.resolution,
           retry_count: hextileData.retry_count ?? 0
         })

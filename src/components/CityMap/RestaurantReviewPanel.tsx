@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 
 // Define interfaces for Yelp testing state
 interface Restaurant {
@@ -58,9 +58,10 @@ interface YelpTestResult {
 
 interface RestaurantReviewPanelProps {
   yelpResults: YelpTestResult | null;
+  cityName?: string;
 }
 
-export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewPanelProps) {
+export default function RestaurantReviewPanel({ yelpResults, cityName }: RestaurantReviewPanelProps) {
   const [expandedDetailsHexagons, setExpandedDetailsHexagons] = useState<Set<string>>(new Set());
   const [activeTab, setActiveTab] = useState<'summary' | 'details' | 'restaurants'>('summary');
   
@@ -114,6 +115,10 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
   const [filterOutZeroRating, setFilterOutZeroRating] = useState(false);
   const [filterOutNoFullAddress, setFilterOutNoFullAddress] = useState(false);
   const [filterOutCached, setFilterOutCached] = useState(false);
+
+  // Add to existing state declarations (around line 64-110):
+  const [importLogs, setImportLogs] = useState<any[]>([]);
+  const [showImportHistory, setShowImportHistory] = useState(false);
 
   // FIX: Move early return check AFTER all hooks are called
   // All hooks must be called in the same order on every render
@@ -267,6 +272,25 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
     };
   };
   
+  // Helper function to update import log counts optimistically
+  const updateImportLogCounts = useCallback((
+    importLogId: string, 
+    stagedDelta: number = 0, 
+    approvedDelta: number = 0
+  ) => {
+    if ((stagedDelta === 0 && approvedDelta === 0) || !importLogId) return;
+    
+    setImportLogs(prev => prev.map(log => 
+      log.id === importLogId
+        ? {
+            ...log,
+            restaurants_staged: Math.max(0, (log.restaurants_staged || 0) + stagedDelta),
+            restaurants_approved: Math.max(0, (log.restaurants_approved || 0) + approvedDelta)
+          }
+        : log
+    ));
+  }, []);
+  
   // Handle restaurant approval/rejection
   const handleRestaurantReview = async (restaurantId: string, status: 'approved' | 'rejected') => {
     // Rejection is a no-op - we just track it in UI, don't save to staging
@@ -334,6 +358,11 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
           throw new Error(data.message || 'Failed to create restaurant in staging');
         }
       } else {
+        // Success - update local import log state optimistically
+        if (yelpResults?.importLogId && data.createdCount > 0) {
+          updateImportLogCounts(yelpResults.importLogId, data.createdCount, 0);
+        }
+        
         // Success - check for partial duplicates
         if (data.duplicates && data.duplicates.length > 0) {
           setReviewMessage({ 
@@ -584,11 +613,21 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
       
       // Show success/error message
       if (totalCreated > 0 && errors.length === 0) {
+        // Update local import log state optimistically
+        if (yelpResults?.importLogId && totalCreated > 0) {
+          updateImportLogCounts(yelpResults.importLogId, totalCreated, 0);
+        }
+        
         setReviewMessage({ 
           type: 'success', 
           text: `Successfully approved and saved ${totalCreated} restaurant${totalCreated === 1 ? '' : 's'} to staging${totalSkipped > 0 ? ` (${totalSkipped} duplicates skipped)` : ''}` 
         });
       } else if (totalCreated > 0) {
+        // Partial success - still update counts
+        if (yelpResults?.importLogId && totalCreated > 0) {
+          updateImportLogCounts(yelpResults.importLogId, totalCreated, 0);
+        }
+        
         setReviewMessage({ 
           type: 'error', 
           text: `Partially completed: ${totalCreated} saved, ${totalErrors} failed. ${errors.slice(0, 2).join('; ')}` 
@@ -969,6 +1008,16 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
     setSelectedRestaurantIds(new Set());
   }, [yelpResults]);
 
+  // Add useEffect to fetch logs when we have a cityId:
+  useEffect(() => {
+    if (yelpResults?.cityId) {
+      fetch(`/api/yelp/import-logs?cityId=${yelpResults.cityId}`)
+        .then(res => res.json())
+        .then(data => setImportLogs(data.logs || []))
+        .catch(console.error);
+    }
+  }, [yelpResults?.cityId]);
+
   // FIX: Early return check moved AFTER all hooks (useState, useMemo, useEffect)
   // This ensures hooks are always called in the same order
   if (!yelpResults || !yelpResults.results || yelpResults.results.length === 0) {
@@ -1266,6 +1315,50 @@ export default function RestaurantReviewPanel({ yelpResults }: RestaurantReviewP
                   </div>
                 )}
               </div>
+
+              {/* Import History - Collapsible */}
+              {yelpResults?.cityId && (
+                <div className="bg-slate-50 rounded-xl border border-slate-200 overflow-hidden">
+                  <button
+                    onClick={() => setShowImportHistory(!showImportHistory)}
+                    className="w-full px-4 py-3 flex justify-between items-center hover:bg-slate-100"
+                  >
+                    <span className="font-semibold text-slate-700">
+                      📋 Import History{cityName ? ` - ${cityName}` : ''} ({importLogs.length})
+                    </span>
+                    <span>{showImportHistory ? '▼' : '▶'}</span>
+                  </button>
+                  {showImportHistory && (
+                    <div className="px-4 pb-4 space-y-2 max-h-80 overflow-y-auto">
+                      {importLogs.map((log: any) => (
+                        <div key={log.id} className="text-sm p-3 bg-white rounded-lg border space-y-2">
+                          <div className="flex justify-between items-center">
+                            <span className={`font-medium ${log.status === 'complete' ? 'text-green-600' : log.status === 'running' ? 'text-orange-500' : 'text-red-600'}`}>
+                              {log.status === 'complete' ? '✅' : log.status === 'running' ? '⏳' : '❌'} {new Date(log.created_at).toLocaleDateString()}
+                            </span>
+                            <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded">
+                              {log.processed_tiles}/{log.total_tiles} tiles
+                              {(log.tiles_cached > 0) && ` (${log.tiles_cached} cached)`}
+                            </span>
+                          </div>
+                          <div className="text-xs text-slate-600 grid grid-cols-2 gap-1">
+                            <span>📥 Fetched: {log.restaurants_fetched || 0}</span>
+                            <span>🔄 Unique: {log.restaurants_unique || 0}</span>
+                            <span>💾 Staged: {log.restaurants_staged || 0}</span>
+                            <span className="text-green-600 font-medium">✅ Approved: {log.restaurants_approved || 0}</span>
+                          </div>
+                          {((log.validation_failures > 0) || (log.duplicates_existing > 0)) && (
+                            <div className="text-xs text-slate-400">
+                              ⚠️ {log.validation_failures || 0} invalid • 🔄 {log.duplicates_existing || 0} existing dupes
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                      {importLogs.length === 0 && <p className="text-slate-500 text-sm">No previous imports</p>}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

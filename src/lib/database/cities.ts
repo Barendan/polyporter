@@ -1,6 +1,7 @@
 // Database helper functions for cities and polygon zones
 import { supabaseServer } from '../config/supabaseServer';
 import type { City, YelpPolygonZone, CreateCityInput, CreatePolygonZoneInput } from '../types';
+import { normalizeCityName, normalizeStateCode } from '../utils/cityNormalizer';
 
 /**
  * Get city by name and state
@@ -8,11 +9,19 @@ import type { City, YelpPolygonZone, CreateCityInput, CreatePolygonZoneInput } f
  */
 export async function getCityByName(name: string, state: string): Promise<City | null> {
   try {
+    // Normalize inputs (defense-in-depth)
+    const normalizedName = normalizeCityName(name);
+    const normalizedState = normalizeStateCode(state);
+    
+    if (!normalizedState) {
+      return null;
+    }
+    
     const { data, error } = await supabaseServer
       .from('cities')
       .select('*')
-      .eq('name', name)
-      .eq('state', state)
+      .ilike('name', normalizedName)  // Case-insensitive comparison
+      .eq('state', normalizedState)
       .maybeSingle();
 
     if (error) {
@@ -34,19 +43,27 @@ export async function getCityByName(name: string, state: string): Promise<City |
  */
 export async function createCity(cityData: CreateCityInput): Promise<string | null> {
   try {
-    // First, check if city already exists
-    const existing = await getCityByName(cityData.name, cityData.state);
+    // Normalize inputs (defense-in-depth)
+    const normalizedName = normalizeCityName(cityData.name);
+    const normalizedState = normalizeStateCode(cityData.state);
+    
+    if (!normalizedState) {
+      return null;
+    }
+    
+    // First, check if city already exists (with normalized values)
+    const existing = await getCityByName(normalizedName, normalizedState);
     if (existing) {
-      console.log(`✅ City already exists in database: ${cityData.name}, ${cityData.state} (ID: ${existing.id})`);
+      console.log(`✅ City already exists in database: ${normalizedName}, ${normalizedState} (ID: ${existing.id})`);
       return existing.id;
     }
 
-    // City doesn't exist, create it
+    // City doesn't exist, create it with normalized values
     const { data, error } = await supabaseServer
       .from('cities')
       .insert({
-        name: cityData.name,
-        state: cityData.state,
+        name: normalizedName,
+        state: normalizedState,
         country: cityData.country,
         polygon_area_km2: cityData.polygon_area_km2
       })
@@ -57,7 +74,7 @@ export async function createCity(cityData: CreateCityInput): Promise<string | nu
       // Check if error is due to duplicate (race condition)
       if (error.code === '23505') { // Unique constraint violation
         console.log(`⚠️ City was created by another process, fetching existing...`);
-        const existingAfter = await getCityByName(cityData.name, cityData.state);
+        const existingAfter = await getCityByName(normalizedName, normalizedState);
         if (existingAfter) {
           return existingAfter.id;
         }
@@ -71,7 +88,7 @@ export async function createCity(cityData: CreateCityInput): Promise<string | nu
       return null;
     }
 
-    console.log(`✅ Created new city in database: ${cityData.name}, ${cityData.state} (ID: ${data.id})`);
+    console.log(`✅ Created new city in database: ${normalizedName}, ${normalizedState} (ID: ${data.id})`);
     return data.id;
   } catch (error) {
     console.error('Exception creating city in database:', error);

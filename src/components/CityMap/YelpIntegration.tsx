@@ -219,15 +219,41 @@ export default function YelpIntegration({ cityData, onResultsUpdate }: YelpInteg
       totalHexagonsRef.current = totalHexagons;
       setProgress({ total: totalHexagons, processed: 0, remaining: totalHexagons, currentPhase: 'phase1' });
       
+
+      if (!cityData?.city_id) {
+        console.warn("⚠️ No city_id available; Yelp import requires city_id. Skipping Yelp processing.");
+        // Set error state if available, otherwise just log
+        if (setYelpResults) {
+          setYelpResults({
+            error: "City data is not fully loaded. Please try searching for the city again.",
+            success: false
+          });
+        }
+        return;
+      }
+      
+      const payload = {
+        action: 'process_hexagons',
+        hexagons: hexagonData,
+        city_id: cityData.city_id ?? null,
+        cityName: cityData.city_query ?? null,
+        traceId: (cityData as any).traceId ?? `yelp_${Date.now()}`
+      };
+
+      console.log('[YelpIntegration] POST /api/yelp/search payload', {
+        traceId: payload.traceId,
+        city_id: payload.city_id,
+        cityName: payload.cityName,
+        cityData_name: cityData.name
+      });
+
       const response = await fetch('/api/yelp/search', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          action: 'process_hexagons',
-          hexagons: hexagonData,
-          cityName: cityData!.name,
+          ...payload,
           testMode: useTestMode
         }),
       });

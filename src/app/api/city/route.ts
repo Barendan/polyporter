@@ -8,9 +8,8 @@ import {
 } from '@/lib/geography/cityUtils';
 import { executeOverpassStrategies } from '@/lib/geography/overpassClient';
 import { fetchCityFromNominatim } from '@/lib/geography/nominatimClient';
-import type { Feature, Polygon, MultiPolygon } from 'geojson';
 import { getCityWithPolygon, createCity, upsertPolygonZone } from '@/lib/database/cities';
-import { dbToEnhancedCityResponse, parseCityInput } from '@/lib/database/cityConverter';
+import { dbToEnhancedCityResponse, parseCityInput } from '@/lib/utils/cityNormalizer';
 import { checkCacheStatus } from '@/lib/database/cacheLoader';
 
 export async function GET(request: NextRequest) {
@@ -25,59 +24,138 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // STEP 1: Check Supabase cache first (graceful degradation - if DB fails, continue normally)
+    // Generate a simple trace identifier for end-to-end logging
+    const traceId = `city_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    console.log(`[${traceId}] /api/city input`, { raw: cityName });
+
+    // STEP 1: Normalize input immediately (single source of truth)
     const parsed = parseCityInput(cityName.trim());
-    if (parsed) {
-      try {
-        const cached = await getCityWithPolygon(parsed.cityName, parsed.state);
-        if (cached) {
-          const enhancedFromCache = dbToEnhancedCityResponse(cached.city, cached.polygonZone);
-          if (enhancedFromCache) {
-            // Add cache status for restaurant data
-            await addCacheStatusToResponse(enhancedFromCache, cached.city.id);
-            return NextResponse.json(enhancedFromCache);
-          }
+    if (!parsed) {
+      return NextResponse.json({ error: 'Invalid city format' }, { status: 400 });
+    }
+    
+    // Create normalized query string for external APIs
+    const normalizedQuery = `${parsed.cityName}, ${parsed.state}`;
+    const cityQuery = normalizedQuery; // City query in "City, ST" format for downstream use
+
+    console.log(`[${traceId}] /api/city parsed`, { parsed, cityQuery });
+    
+    // STEP 2: Check Supabase cache first (graceful degradation - if DB fails, continue normally)
+    try {
+      const cached = await getCityWithPolygon(parsed.cityName, parsed.state);
+      if (cached) {
+        const enhancedFromCache = dbToEnhancedCityResponse(cached.city, cached.polygonZone);
+        if (enhancedFromCache) {
+          // Add cache status for restaurant data
+          const cacheData = await getCacheStatusData(cached.city.id);
+          
+          // Return new object with proper types (no mutation)
+          const responseBody: EnhancedCityResponse = {
+            ...enhancedFromCache,
+            city_id: cached.city.id,
+            city_query: cityQuery,
+            ...(cacheData && { cachedRestaurantData: cacheData }),
+            traceId
+          };
+
+          console.log(`[${traceId}] /api/city response (cached)`, {
+            city_id: responseBody.city_id,
+            city_query: responseBody.city_query,
+            name: responseBody.name
+          });
+          
+          return NextResponse.json(responseBody);
         }
-      } catch (dbError) {
-        // Graceful degradation: if DB check fails, continue with normal flow
-        console.error('BIG: Database check failed:', dbError);
       }
+    } catch (dbError) {
+      // Graceful degradation: if DB check fails, continue with normal flow
+      console.error('BIG: Database check failed:', dbError);
     }
 
-    // STEP 2: If not in cache, fetch from external APIs (existing logic)
+    // STEP 3: If not in cache, fetch from external APIs (use normalized query)
     // Try Nominatim API first (default)
-    const nominatimResult = await fetchCityFromNominatim(cityName.trim());
-    console.log('nominatim did it....', cityName.trim());
+    const nominatimResult = await fetchCityFromNominatim(normalizedQuery);
+    console.log(`[${traceId}] /api/city nominatim did it`, { normalizedQuery });
     if (nominatimResult) {
       // Create enhanced response with buffered polygon and H3 grid
       const enhancedResult = createEnhancedCityResponse(nominatimResult);
       
-      // STEP 3: Save to cache (graceful degradation - if save fails, still return result)
-      const cityId = await saveCityToCache(enhancedResult, nominatimResult.source, cityName.trim());
+      // STEP 4: Save to cache (graceful degradation - if save fails, still return result)
+      const cityId = await saveCityToCache(
+        enhancedResult,
+        nominatimResult.source,
+        normalizedQuery,
+        parsed
+      );
       
-      // Add cache status for restaurant data
-      if (cityId) {
-        await addCacheStatusToResponse(enhancedResult, cityId);
-      }
+      console.log(`[${traceId}] /api/city cache result (nominatim)`, {
+        cityId,
+        city_query: cityQuery,
+        enhanced_name: enhancedResult.name,
+        hasH3: !!enhancedResult.h3_grid?.length
+      });
       
-      return NextResponse.json(enhancedResult);
+      // Get cache status data when cityId is available
+      const cacheData = cityId ? await getCacheStatusData(cityId) : null;
+      
+      // Return new object with proper types (no mutation)
+      const responseBody: EnhancedCityResponse = {
+        ...enhancedResult,
+        city_id: cityId ?? null,
+        city_query: cityQuery,
+        ...(cacheData && { cachedRestaurantData: cacheData }),
+        traceId
+      };
+
+      console.log(`[${traceId}] /api/city response (nominatim)`, {
+        city_id: responseBody.city_id,
+        city_query: responseBody.city_query,
+        name: responseBody.name
+      });
+      
+      return NextResponse.json(responseBody);
     }
 
     // Fallback to Overpass if Nominatim fails
-    const overpassResult = await tryOverpassAPI(cityName.trim());
+    const overpassResult = await tryOverpassAPI(normalizedQuery);
     if (overpassResult) {
       // Create enhanced response with buffered polygon and H3 grid
       const enhancedResult = createEnhancedCityResponse(overpassResult);
       
-      // STEP 3: Save to cache (graceful degradation - if save fails, still return result)
-      const cityId = await saveCityToCache(enhancedResult, overpassResult.source, cityName.trim());
+      // STEP 4: Save to cache (graceful degradation - if save fails, still return result)
+      const cityId = await saveCityToCache(
+        enhancedResult,
+        overpassResult.source,
+        normalizedQuery,
+        parsed
+      );
       
-      // Add cache status for restaurant data
-      if (cityId) {
-        await addCacheStatusToResponse(enhancedResult, cityId);
-      }
+      console.log(`[${traceId}] /api/city cache result (overpass)`, {
+        cityId,
+        city_query: cityQuery,
+        enhanced_name: enhancedResult.name,
+        hasH3: !!enhancedResult.h3_grid?.length
+      });
       
-      return NextResponse.json(enhancedResult);
+      // Get cache status data when cityId is available
+      const cacheData = cityId ? await getCacheStatusData(cityId) : null;
+      
+      // Return new object with proper types (no mutation)
+      const responseBody: EnhancedCityResponse = {
+        ...enhancedResult,
+        city_id: cityId ?? null,
+        city_query: cityQuery,
+        ...(cacheData && { cachedRestaurantData: cacheData }),
+        traceId
+      };
+
+      console.log(`[${traceId}] /api/city response (overpass)`, {
+        city_id: responseBody.city_id,
+        city_query: responseBody.city_query,
+        name: responseBody.name
+      });
+      
+      return NextResponse.json(responseBody);
     }
 
     return NextResponse.json(
@@ -93,19 +171,17 @@ export async function GET(request: NextRequest) {
 }
 
 /**
- * Add restaurant cache status to enhanced city response
- * Mutates the response object to add cache metadata
+ * Get restaurant cache status data (non-mutating helper)
+ * Returns cache metadata object or null if check fails
  */
-async function addCacheStatusToResponse(
-  enhancedResult: EnhancedCityResponse,
-  cityId: string
-): Promise<void> {
+async function getCacheStatusData(cityId: string): Promise<{
+  available: boolean;
+  count: number;
+  hexagonCount: number;
+} | null> {
   try {
     const cacheStatus = await checkCacheStatus(cityId);
-    
-    // Add cache metadata to response
-    (enhancedResult as any).city_id = cityId;
-    (enhancedResult as any).cachedRestaurantData = {
+    return {
       available: cacheStatus.hasCachedData,
       count: cacheStatus.estimatedRestaurants,
       hexagonCount: cacheStatus.hexagonCount
@@ -113,6 +189,7 @@ async function addCacheStatusToResponse(
   } catch (error) {
     // Fail silently - don't break response if cache check fails
     console.warn('Failed to check restaurant cache status (non-fatal):', error);
+    return null;
   }
 }
 
@@ -124,34 +201,20 @@ async function addCacheStatusToResponse(
 async function saveCityToCache(
   enhancedResult: EnhancedCityResponse,
   source: 'overpass' | 'nominatim',
-  originalInput: string
+  originalInput: string,
+  preParsed?: { cityName: string; state: string } | null  // ADD: Optional pre-parsed object
 ): Promise<string | null> {
+
   try {
-    // Use original input for parsing (more reliable than display name)
-    let parsed = parseCityInput(originalInput);
+    // Only use preParsed or originalInput - never parse enhancedResult.name (could be display_name)
+    let parsed = preParsed || parseCityInput(originalInput);
     
-    // If original input doesn't parse, try parsing from enhanced result name
+    // If we still can't parse, fail gracefully
     if (!parsed) {
-      parsed = parseCityInput(enhancedResult.name);
+      console.error(`❌ Failed to parse city input in saveCityToCache: originalInput="${originalInput}", preParsed=${preParsed ? 'provided' : 'missing'}`);
+      return null;
     }
-    
-    // If still can't parse, try extracting from name parts
-    if (!parsed) {
-      const parts = enhancedResult.name.includes(', ') 
-        ? enhancedResult.name.split(', ')
-        : enhancedResult.name.includes(',')
-        ? enhancedResult.name.split(',').map(p => p.trim())
-        : null;
-      if (parts && parts.length >= 2) {
-        const { normalizeStateCode, normalizeCityName } = await import('@/lib/utils/stateNormalizer');
-        parsed = {
-          cityName: normalizeCityName(parts[0]),
-          state: normalizeStateCode(parts[1])
-        };
-      } else {
-        return null;
-      }
-    }
+  
 
     // Calculate polygon area if possible
     const polygonArea = enhancedResult.grid_stats?.coverage_area_km2;

@@ -14,11 +14,18 @@ import { processingStates, type ProcessingState } from './state';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { action, hexagons, cityName, testMode, city_id } = body;
+    const { action, hexagons, cityName, testMode, city_id, traceId } = body;
+
+    console.log('[yelp/search route] body', {
+      traceId,
+      action,
+      city_id,
+      cityName
+    });
 
     switch (action) {
       case 'process_hexagons':
-        return await processHexagons(hexagons, testMode, cityName);
+        return await processHexagons(hexagons, testMode, cityName, city_id);
       
       case 'get_processing_status':
         return await getStatus();

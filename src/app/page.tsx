@@ -79,6 +79,13 @@ export default function Home() {
       // Step 3: Generating grid
       setLoadingStep(3);
       
+      console.log('[CityMap] setCityData from /api/city', {
+        traceId: (result as any).traceId,
+        city_id: (result as any).city_id,
+        city_query: (result as any).city_query,
+        name: result.name
+      });
+
       setCityData(result);
       
       // Calculate enhanced stats
@@ -111,6 +118,17 @@ export default function Home() {
       setLoadingStep(1);
     }
   };
+
+  // Log whenever cityData changes so we can see if/when city_id or city_query are lost
+  useEffect(() => {
+    if (!cityData) return;
+    console.log('[CityMap] cityData changed', {
+      traceId: (cityData as any).traceId,
+      city_id: (cityData as any).city_id,
+      city_query: (cityData as any).city_query,
+      name: cityData.name
+    });
+  }, [cityData]);
 
   return (
     <div className="min-h-screen bg-gray-50 p-4">

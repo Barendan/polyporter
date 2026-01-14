@@ -6,6 +6,50 @@ import type { YelpBusiness } from '@/lib/yelp/search';
 import type { YelpStagingStatus } from '@/lib/types';
 
 /**
+ * Helper function to update hex tile staged count from actual database count
+ */
+async function updateHextileStagedCount(h3Id: string): Promise<void> {
+  try {
+    const { upsertHextile, getHextile, getHextileCenter } = await import('@/lib/database/hextiles');
+    const h3 = await import('h3-js');
+    
+    // Calculate actual staged count from database
+    const { count, error: countError } = await supabaseServer
+      .from('yelp_staging')
+      .select('*', { count: 'exact', head: true })
+      .eq('h3_id', h3Id.trim());
+    
+    if (countError) {
+      console.warn(`⚠️ Failed to count staged restaurants for ${h3Id.trim()}:`, countError);
+      return;
+    }
+    
+    const actualStagedCount = count || 0;
+    const existing = await getHextile(h3Id.trim());
+    
+    const center = getHextileCenter(h3Id.trim());
+    if (center) {
+      const resolution = h3.getResolution(h3Id.trim());
+      
+      await upsertHextile({
+        h3_id: h3Id.trim(),
+        city_id: existing?.city_id || '', // Preserve city_id
+        status: existing?.status || 'fetched',
+        center_lat: center.lat,
+        center_lng: center.lng,
+        staged: actualStagedCount,  // Use actual count from database
+        resolution: resolution
+      });
+      
+      console.log(`✅ Updated hexagon ${h3Id.trim()}: staged count = ${actualStagedCount} (calculated from database)`);
+    }
+  } catch (hexError) {
+    // Non-fatal: log warning but don't throw
+    console.warn(`⚠️ Failed to update hexagon staged count ${h3Id} (non-fatal):`, hexError);
+  }
+}
+
+/**
  * Main POST handler that routes to specific staging operations based on action
  */
 export async function POST(request: NextRequest) {
@@ -125,8 +169,11 @@ async function handleBulkCreate(body: any): Promise<NextResponse> {
     // 🔧 FIX: Create/update hexagon BEFORE saving restaurants
     // This ensures the foreign key constraint is satisfied
     try {
-      const { upsertHextile, getHextileCenter } = await import('@/lib/database/hextiles');
+      const { upsertHextile, getHextile, getHextileCenter } = await import('@/lib/database/hextiles');
       const h3 = await import('h3-js');
+      
+      // Get existing hexagon to check if it already has yelp_total_businesses
+      const existing = await getHextile(h3Id.trim());
       
       const center = getHextileCenter(h3Id.trim());
       if (center) {
@@ -135,10 +182,12 @@ async function handleBulkCreate(body: any): Promise<NextResponse> {
         const hextileResult = await upsertHextile({
           h3_id: h3Id.trim(),
           city_id: cityId.trim(),
-          status: 'fetched', // Will be updated based on actual save results
+          status: 'fetched',
           center_lat: center.lat,
           center_lng: center.lng,
-          yelp_total_businesses: restaurants.length, // Initial estimate
+          // Only set yelp_total_businesses if hexagon is new (preserve existing if updating)
+          yelp_total_businesses: existing?.yelp_total_businesses ?? restaurants.length,
+          staged: existing?.staged ?? 0,  // Preserve existing staged count
           resolution: resolution
         });
         
@@ -182,35 +231,38 @@ async function handleBulkCreate(body: any): Promise<NextResponse> {
       importLogId.trim()
     );
 
-    // Update hexagon with actual count after save
+    // Update hexagon with staged count after save
+    // DO NOT update yelp_total_businesses - it's immutable after first set
+    // Calculate actual count from database instead of incrementing for accuracy
     if (result.createdCount > 0) {
-      try {
-        const { upsertHextile, getHextileCenter } = await import('@/lib/database/hextiles');
-        const h3 = await import('h3-js');
-        
-        const center = getHextileCenter(h3Id.trim());
-        if (center) {
-          const resolution = h3.getResolution(h3Id.trim());
-          
-          await upsertHextile({
-            h3_id: h3Id.trim(),
-            city_id: cityId.trim(),
-            status: 'fetched', 
-            center_lat: center.lat,
-            center_lng: center.lng,
-            yelp_total_businesses: result.createdCount, // Update with actual count
-            resolution: resolution
-          });
-          
-          console.log(`✅ Updated hexagon ${h3Id.trim()} with final count: ${result.createdCount} new restaurants`);
-        }
-      } catch (hexError) {
-        // Non-fatal: restaurant saving succeeded, hexagon update is optional
-        console.warn(`⚠️ Failed to update hexagon count ${h3Id} (non-fatal):`, hexError);
-      }
+      await updateHextileStagedCount(h3Id.trim());
     }
 
     if (result.createdCount > 0) {
+      // Update import log with staging statistics (increment instead of overwrite)
+      try {
+        const { 
+          incrementStagedCount, 
+          incrementDuplicatesCount, 
+          incrementValidationFailuresCount 
+        } = await import('@/lib/database/importLogs');
+        
+        // Increment each count separately
+        if (result.createdCount > 0) {
+          await incrementStagedCount(importLogId.trim(), result.createdCount);
+        }
+        if (result.skippedCount > 0) {
+          await incrementDuplicatesCount(importLogId.trim(), result.skippedCount);
+        }
+        if (result.errorCount > 0) {
+          await incrementValidationFailuresCount(importLogId.trim(), result.errorCount);
+        }
+        
+        console.log(`✅ Updated import log ${importLogId} with staging stats: +${result.createdCount} staged, +${result.skippedCount} dupes, +${result.errorCount} invalid`);
+      } catch (logError) {
+        console.warn('⚠️ Failed to update import log with staging stats (non-fatal):', logError);
+      }
+
       return NextResponse.json({
         success: true,
         message: `Successfully created ${result.createdCount} restaurant${result.createdCount === 1 ? '' : 's'} in staging${result.skippedCount > 0 ? `, ${result.skippedCount} duplicate${result.skippedCount === 1 ? '' : 's'} skipped` : ''}`,
@@ -308,6 +360,31 @@ async function handleBulkUpdateStatus(body: any): Promise<NextResponse> {
     );
 
     if (result.successCount > 0) {
+      // Update import log approval count if this is an approval action
+      if (status === 'approved') {
+        try {
+          // Get the import log ID and h3_id from one of the updated records
+          const { data: stagingRecord } = await supabaseServer
+            .from('yelp_staging')
+            .select('yelp_import_log, h3_id')
+            .eq('id', yelpIds[0])
+            .single();
+
+          if (stagingRecord?.yelp_import_log) {
+            const { incrementApprovedCount } = await import('@/lib/database/importLogs');
+            await incrementApprovedCount(stagingRecord.yelp_import_log, result.successCount);
+            console.log(`✅ Updated import log ${stagingRecord.yelp_import_log}: +${result.successCount} approved`);
+          }
+
+          // Update hex tile staged count - recalculate from database to ensure accuracy
+          if (stagingRecord?.h3_id) {
+            await updateHextileStagedCount(stagingRecord.h3_id);
+          }
+        } catch (logError) {
+          console.warn('⚠️ Failed to update import log approval count (non-fatal):', logError);
+        }
+      }
+
       return NextResponse.json({
         success: true,
         message: `Successfully updated ${result.successCount} restaurant${result.successCount === 1 ? '' : 's'} to ${status}`,
