@@ -238,31 +238,29 @@ async function handleBulkCreate(body: any): Promise<NextResponse> {
       await updateHextileStagedCount(h3Id.trim());
     }
 
-    if (result.createdCount > 0) {
-      // Update import log with staging statistics (increment instead of overwrite)
-      try {
-        const { 
-          incrementStagedCount, 
-          incrementDuplicatesCount, 
-          incrementValidationFailuresCount 
-        } = await import('@/lib/database/importLogs');
-        
-        // Increment each count separately
-        if (result.createdCount > 0) {
-          await incrementStagedCount(importLogId.trim(), result.createdCount);
-        }
-        if (result.skippedCount > 0) {
-          await incrementDuplicatesCount(importLogId.trim(), result.skippedCount);
-        }
-        if (result.errorCount > 0) {
-          await incrementValidationFailuresCount(importLogId.trim(), result.errorCount);
-        }
-        
-        console.log(`✅ Updated import log ${importLogId} with staging stats: +${result.createdCount} staged, +${result.skippedCount} dupes, +${result.errorCount} invalid`);
-      } catch (logError) {
-        console.warn('⚠️ Failed to update import log with staging stats (non-fatal):', logError);
+    // Update import log with staging statistics (increment instead of overwrite)
+    // FIX: Update duplicates count even when all restaurants are duplicates (createdCount === 0)
+    try {
+      const { 
+        incrementStagedCount, 
+        incrementDuplicatesCount
+      } = await import('@/lib/database/importLogs');
+      
+      // Increment each count separately
+      if (result.createdCount > 0) {
+        await incrementStagedCount(importLogId.trim(), result.createdCount);
       }
+      // FIX: Always update duplicates count, even if createdCount is 0
+      if (result.skippedCount > 0) {
+        await incrementDuplicatesCount(importLogId.trim(), result.skippedCount);
+      }
+      
+      console.log(`✅ Updated import log ${importLogId} with staging stats: +${result.createdCount} staged, +${result.skippedCount} dupes`);
+    } catch (logError) {
+      console.warn('⚠️ Failed to update import log with staging stats (non-fatal):', logError);
+    }
 
+    if (result.createdCount > 0) {
       return NextResponse.json({
         success: true,
         message: `Successfully created ${result.createdCount} restaurant${result.createdCount === 1 ? '' : 's'} in staging${result.skippedCount > 0 ? `, ${result.skippedCount} duplicate${result.skippedCount === 1 ? '' : 's'} skipped` : ''}`,
@@ -360,28 +358,21 @@ async function handleBulkUpdateStatus(body: any): Promise<NextResponse> {
     );
 
     if (result.successCount > 0) {
-      // Update import log approval count if this is an approval action
+      // Update hex tile staged count - recalculate from database to ensure accuracy
       if (status === 'approved') {
         try {
-          // Get the import log ID and h3_id from one of the updated records
+          // Get the h3_id from one of the updated records
           const { data: stagingRecord } = await supabaseServer
             .from('yelp_staging')
-            .select('yelp_import_log, h3_id')
+            .select('h3_id')
             .eq('id', yelpIds[0])
             .single();
 
-          if (stagingRecord?.yelp_import_log) {
-            const { incrementApprovedCount } = await import('@/lib/database/importLogs');
-            await incrementApprovedCount(stagingRecord.yelp_import_log, result.successCount);
-            console.log(`✅ Updated import log ${stagingRecord.yelp_import_log}: +${result.successCount} approved`);
-          }
-
-          // Update hex tile staged count - recalculate from database to ensure accuracy
           if (stagingRecord?.h3_id) {
             await updateHextileStagedCount(stagingRecord.h3_id);
           }
         } catch (logError) {
-          console.warn('⚠️ Failed to update import log approval count (non-fatal):', logError);
+          console.warn('⚠️ Failed to update hex tile staged count (non-fatal):', logError);
         }
       }
 

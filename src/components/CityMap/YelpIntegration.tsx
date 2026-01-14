@@ -114,9 +114,36 @@ export default function YelpIntegration({ cityData, onResultsUpdate }: YelpInteg
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const totalHexagonsRef = useRef<number>(0);
   const [finalApiCalls, setFinalApiCalls] = useState<number | undefined>(undefined);
+  const previousCityIdRef = useRef<string | null | undefined>(null);
 
   // Check if we should render - moved after all hooks to follow Rules of Hooks
   const shouldRender = cityData && cityData.h3_grid && cityData.h3_grid.length > 0;
+
+  // Reset component state when city changes
+  useEffect(() => {
+    const currentCityId = cityData?.city_id;
+    
+    // Only reset if city_id actually changed (not on initial mount with same city)
+    if (previousCityIdRef.current !== null && previousCityIdRef.current !== currentCityId) {
+      // City changed - reset all state to initial values
+      setFinalApiCalls(undefined);
+      setYelpResults(null);
+      setProgress(null);
+      setProcessingStatus(null);
+      setQuotaStatus(null);
+      setYelpTesting(false);
+      totalHexagonsRef.current = 0;
+      
+      // Clear any active polling
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
+      }
+    }
+    
+    // Update ref to track current city_id
+    previousCityIdRef.current = currentCityId;
+  }, [cityData?.city_id]);
 
   // Helper function to calculate accurate API call estimates
   const calculateAPICalls = (hexagonCount: number): number => {
@@ -461,7 +488,11 @@ export default function YelpIntegration({ cityData, onResultsUpdate }: YelpInteg
                 <div className="flex justify-between">
                   <span>Actual API Calls (Real Mode):</span>
                   <span className="font-mono font-medium text-green-600">
-                    {finalApiCalls !== undefined ? finalApiCalls : 'Calculating...'}
+                    {finalApiCalls !== undefined 
+                      ? finalApiCalls 
+                      : yelpTesting 
+                        ? 'Calculating...' 
+                        : '—'}
                   </span>
                 </div>
               </div>

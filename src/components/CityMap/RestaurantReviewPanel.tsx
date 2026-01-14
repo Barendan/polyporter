@@ -275,17 +275,15 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
   // Helper function to update import log counts optimistically
   const updateImportLogCounts = useCallback((
     importLogId: string, 
-    stagedDelta: number = 0, 
-    approvedDelta: number = 0
+    stagedDelta: number = 0
   ) => {
-    if ((stagedDelta === 0 && approvedDelta === 0) || !importLogId) return;
+    if (stagedDelta === 0 || !importLogId) return;
     
     setImportLogs(prev => prev.map(log => 
       log.id === importLogId
         ? {
             ...log,
-            restaurants_staged: Math.max(0, (log.restaurants_staged || 0) + stagedDelta),
-            restaurants_approved: Math.max(0, (log.restaurants_approved || 0) + approvedDelta)
+            restaurants_staged: Math.max(0, (log.restaurants_staged || 0) + stagedDelta)
           }
         : log
     ));
@@ -360,7 +358,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
       } else {
         // Success - update local import log state optimistically
         if (yelpResults?.importLogId && data.createdCount > 0) {
-          updateImportLogCounts(yelpResults.importLogId, data.createdCount, 0);
+          updateImportLogCounts(yelpResults.importLogId, data.createdCount);
         }
         
         // Success - check for partial duplicates
@@ -615,7 +613,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
       if (totalCreated > 0 && errors.length === 0) {
         // Update local import log state optimistically
         if (yelpResults?.importLogId && totalCreated > 0) {
-          updateImportLogCounts(yelpResults.importLogId, totalCreated, 0);
+          updateImportLogCounts(yelpResults.importLogId, totalCreated);
         }
         
         setReviewMessage({ 
@@ -625,7 +623,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
       } else if (totalCreated > 0) {
         // Partial success - still update counts
         if (yelpResults?.importLogId && totalCreated > 0) {
-          updateImportLogCounts(yelpResults.importLogId, totalCreated, 0);
+          updateImportLogCounts(yelpResults.importLogId, totalCreated);
         }
         
         setReviewMessage({ 
@@ -1008,15 +1006,15 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
     setSelectedRestaurantIds(new Set());
   }, [yelpResults]);
 
-  // Add useEffect to fetch logs when we have a cityId:
+  // Fetch all import logs when we have yelpResults (cached or fresh)
   useEffect(() => {
-    if (yelpResults?.cityId) {
-      fetch(`/api/yelp/import-logs?cityId=${yelpResults.cityId}`)
+    if (yelpResults) {
+      fetch(`/api/yelp/import-logs?limit=50`)
         .then(res => res.json())
         .then(data => setImportLogs(data.logs || []))
         .catch(console.error);
     }
-  }, [yelpResults?.cityId]);
+  }, [yelpResults]);
 
   // FIX: Early return check moved AFTER all hooks (useState, useMemo, useEffect)
   // This ensures hooks are always called in the same order
@@ -1316,15 +1314,15 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
                 )}
               </div>
 
-              {/* Import History - Collapsible */}
-              {yelpResults?.cityId && (
+              {/* Import History - Always show when we have results */}
+              {yelpResults && (
                 <div className="bg-slate-50 rounded-xl border border-slate-200 overflow-hidden">
                   <button
                     onClick={() => setShowImportHistory(!showImportHistory)}
                     className="w-full px-4 py-3 flex justify-between items-center hover:bg-slate-100"
                   >
                     <span className="font-semibold text-slate-700">
-                      📋 Import History{cityName ? ` - ${cityName}` : ''} ({importLogs.length})
+                      📋 Import History ({importLogs.length})
                     </span>
                     <span>{showImportHistory ? '▼' : '▶'}</span>
                   </button>
@@ -1341,15 +1339,24 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
                               {(log.tiles_cached > 0) && ` (${log.tiles_cached} cached)`}
                             </span>
                           </div>
+                          {log.cities && (
+                            <div className="text-xs text-slate-500 italic">
+                              {Array.isArray(log.cities) ? log.cities[0]?.name : log.cities?.name}, {Array.isArray(log.cities) ? log.cities[0]?.state : log.cities?.state}
+                            </div>
+                          )}
+                          {!log.cities && log.city_id && (
+                            <div className="text-xs text-slate-500 italic">
+                              City ID: {log.city_id.substring(0, 8)}...
+                            </div>
+                          )}
                           <div className="text-xs text-slate-600 grid grid-cols-2 gap-1">
                             <span>📥 Fetched: {log.restaurants_fetched || 0}</span>
                             <span>🔄 Unique: {log.restaurants_unique || 0}</span>
                             <span>💾 Staged: {log.restaurants_staged || 0}</span>
-                            <span className="text-green-600 font-medium">✅ Approved: {log.restaurants_approved || 0}</span>
                           </div>
-                          {((log.validation_failures > 0) || (log.duplicates_existing > 0)) && (
+                          {log.duplicates_existing > 0 && (
                             <div className="text-xs text-slate-400">
-                              ⚠️ {log.validation_failures || 0} invalid • 🔄 {log.duplicates_existing || 0} existing dupes
+                              🔄 {log.duplicates_existing || 0} existing dupes
                             </div>
                           )}
                         </div>

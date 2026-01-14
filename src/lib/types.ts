@@ -67,9 +67,7 @@ export interface YelpImportLog {
   restaurants_fetched: number;           // Raw from Yelp (with cross-hexagon dupes)
   restaurants_unique: number;            // After cross-hexagon deduplication
   restaurants_staged: number;            // Saved to staging table
-  validation_failures: number;           // Failed validation
   duplicates_existing: number;           // Already in DB from previous imports
-  restaurants_approved: number;          // Admin approved
   
   created_at: string;
   updated_at: string;

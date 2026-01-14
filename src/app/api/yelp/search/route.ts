@@ -202,6 +202,7 @@ async function loadCache(cityId: string): Promise<NextResponse> {
       testMode: false,
       processedAt: cachedData.cacheDate,
       fromCache: true, // Flag to indicate this is cached data
+      cityId: cityId, // Include cityId so import logs can be fetched
       processingStats: {
         totalHexagons: cachedData.totalHexagons,
         processedHexagons: cachedData.totalHexagons,

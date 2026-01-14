@@ -16,9 +16,7 @@ export interface UpdateImportLogInput {
   restaurants_fetched?: number;
   restaurants_unique?: number;
   restaurants_staged?: number;
-  validation_failures?: number;
   duplicates_existing?: number;
-  restaurants_approved?: number;
 }
 
 /**
@@ -40,9 +38,7 @@ export async function createImportLog(logData: CreateImportLogInput): Promise<st
         restaurants_fetched: 0,
         restaurants_unique: 0,
         restaurants_staged: 0,
-        validation_failures: 0,
         duplicates_existing: 0,
-        restaurants_approved: 0,
       })
       .select('id')
       .single();
@@ -109,43 +105,6 @@ export async function updateImportLog(
   }
 }
 
-/**
- * Increment the approved count for an import log
- * Used when admin approves restaurants
- */
-export async function incrementApprovedCount(
-  logId: string,
-  count: number
-): Promise<boolean> {
-  try {
-    const { data: current } = await supabaseServer
-      .from('yelp_import_logs')
-      .select('restaurants_approved')
-      .eq('id', logId)
-      .single();
-
-    if (!current) {
-      console.error('❌ Import log not found for increment:', logId);
-      return false;
-    }
-
-    const { error } = await supabaseServer
-      .from('yelp_import_logs')
-      .update({ restaurants_approved: (current.restaurants_approved || 0) + count })
-      .eq('id', logId);
-
-    if (error) {
-      console.error('❌ Error incrementing approved count:', error);
-      return false;
-    }
-
-    console.log(`✅ Incremented approved count by ${count} for import log: ${logId}`);
-    return true;
-  } catch (error) {
-    console.error('❌ Exception incrementing approved count:', error);
-    return false;
-  }
-}
 
 /**
  * Increment the staged count for an import log
@@ -220,41 +179,6 @@ export async function incrementDuplicatesCount(
   }
 }
 
-/**
- * Increment the validation failures count for an import log
- */
-export async function incrementValidationFailuresCount(
-  logId: string,
-  count: number
-): Promise<boolean> {
-  try {
-    const { data: current } = await supabaseServer
-      .from('yelp_import_logs')
-      .select('validation_failures')
-      .eq('id', logId)
-      .single();
-
-    if (!current) {
-      console.error('❌ Import log not found for increment validation failures count:', logId);
-      return false;
-    }
-
-    const { error } = await supabaseServer
-      .from('yelp_import_logs')
-      .update({ validation_failures: (current.validation_failures || 0) + count })
-      .eq('id', logId);
-
-    if (error) {
-      console.error('❌ Error incrementing validation failures count:', error);
-      return false;
-    }
-
-    return true;
-  } catch (error) {
-    console.error('❌ Exception incrementing validation failures count:', error);
-    return false;
-  }
-}
 
 /**
  * Get import log by ID
@@ -288,7 +212,13 @@ export async function getImportLogsByCity(cityId: string): Promise<YelpImportLog
   try {
     const { data, error } = await supabaseServer
       .from('yelp_import_logs')
-      .select('*')
+      .select(`
+        *,
+        cities (
+          name,
+          state
+        )
+      `)
       .eq('city_id', cityId)
       .order('created_at', { ascending: false });
 
@@ -300,6 +230,38 @@ export async function getImportLogsByCity(cityId: string): Promise<YelpImportLog
     return data || [];
   } catch (error) {
     console.error('Exception fetching import logs by city from database:', error);
+    return [];
+  }
+}
+
+/**
+ * Get all import logs, ordered by most recent
+ * Returns array of import logs, or empty array on error
+ * 
+ * @param limit - Optional limit on number of logs to return (default: 50)
+ */
+export async function getAllImportLogs(limit: number = 50): Promise<YelpImportLog[]> {
+  try {
+    const { data, error } = await supabaseServer
+      .from('yelp_import_logs')
+      .select(`
+        *,
+        cities (
+          name,
+          state
+        )
+      `)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      console.error('Error fetching all import logs from database:', error);
+      return [];
+    }
+
+    return data || [];
+  } catch (error) {
+    console.error('Exception fetching all import logs from database:', error);
     return [];
   }
 }
