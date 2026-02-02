@@ -28,15 +28,7 @@ export function generateSearchPoints(h3Id: string): HexagonCoverage {
     // Calculate optimal primary radius (distance from center to furthest corner)
     const primaryRadius = calculateOptimalRadius(center, boundary);
     
-    // FIXED: Remove hardcoded 3km cap - use H3-based calculation instead
-    const optimizedRadius = primaryRadius; // No more arbitrary 3km cap
-    const primaryPoint: SearchPoint = {
-      lat: center[0],
-      lng: center[1],
-      radius: optimizedRadius,
-      type: 'primary',
-      description: `Center point with H3-optimized ${(optimizedRadius/1000).toFixed(1)}km radius`
-    };
+    const optimizedRadius = primaryRadius; 
     
     // OPTIMIZATION: Use adaptive coverage based on hexagon size
     const hexagonArea = calculateHexagonArea(h3Id);

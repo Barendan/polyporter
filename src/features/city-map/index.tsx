@@ -2,12 +2,12 @@
 
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import L from 'leaflet';
-import type { EnhancedCityResponse } from '@/lib/geography/cityTypes';
-import type { YelpBusiness } from '@/lib/yelp/search';
+import type { EnhancedCityResponse } from '@/shared/geography/cityTypes';
+import type { YelpBusiness } from '@/features/yelp/domain/search';
 import CityMapCore from './CityMapCore';
 import MapControls from './MapControls';
-import YelpIntegration from './YelpIntegration';
-import RestaurantReviewPanel from './RestaurantReviewPanel';
+import YelpIntegration from '@/features/yelp/components/YelpIntegration';
+import RestaurantReviewPanel from '@/features/yelp/components/RestaurantReviewPanel';
 
 // Define interfaces for Yelp testing state
 interface Restaurant {

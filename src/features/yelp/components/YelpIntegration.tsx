@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import type { EnhancedCityResponse } from '@/lib/geography/cityTypes';
-import YelpLoader from '../YelpLoader';
+import type { EnhancedCityResponse } from '@/shared/geography/cityTypes';
+import YelpLoader from './YelpLoader';
 
 // Define interfaces for Yelp testing state
 interface Restaurant {
@@ -227,9 +227,9 @@ export default function YelpIntegration({ cityData, onResultsUpdate }: YelpInteg
         const maxTestHexagons = 5;
         const randomHexagons = getRandomHexagons(cityData!.h3_grid, maxTestHexagons);
         
-        hexagonData = randomHexagons.map((h3Id, index) => ({
+        hexagonData = randomHexagons.map(h3Id => ({
           h3Id,
-          mapIndex: cityData!.h3_grid.indexOf(h3Id), // Use actual grid index
+          mapIndex: cityData!.h3_grid.indexOf(h3Id),
           originalIndex: cityData!.h3_grid.indexOf(h3Id)
         }));
         totalHexagons = maxTestHexagons;

@@ -1,16 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
-import type { CityResponse, EnhancedCityResponse } from '@/lib/geography/cityTypes';
+import type { CityResponse, EnhancedCityResponse } from '@/shared/geography/cityTypes';
 import { 
   selectBestBoundary, 
   osmRelationToGeoJSON, 
   calculateBBox,
   createEnhancedCityResponse
-} from '@/lib/geography/cityUtils';
-import { executeOverpassStrategies } from '@/lib/geography/overpassClient';
-import { fetchCityFromNominatim } from '@/lib/geography/nominatimClient';
-import { getCityWithPolygon, createCity, upsertPolygonZone } from '@/lib/database/cities';
-import { dbToEnhancedCityResponse, parseCityInput } from '@/lib/utils/cityNormalizer';
-import { checkCacheStatus } from '@/lib/database/cacheLoader';
+} from '@/shared/geography/cityUtils';
+import { executeOverpassStrategies } from '@/shared/geography/overpassClient';
+import { fetchCityFromNominatim } from '@/shared/geography/nominatimClient';
+import { getCityWithPolygon, createCity, upsertPolygonZone } from '@/shared/database/cities';
+import { dbToEnhancedCityResponse, parseCityInput } from '@/shared/utils/cityNormalizer';
+import { checkCacheStatus } from '@/shared/database/cacheLoader';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -162,7 +162,7 @@ export async function GET(request: NextRequest) {
       { error: 'No boundary found for this city' },
       { status: 404 }
     );
-  } catch (error) {
+  } catch (_error) {
     return NextResponse.json(
       { error: 'Failed to fetch city data. Please try again.' },
       { status: 500 }
@@ -252,7 +252,7 @@ async function saveCityToCache(
 
     return cityId;
 
-  } catch (error) {
+  } catch (_error) {
     // Fail silently - don't break the API if caching fails
     return null;
   }
@@ -265,7 +265,6 @@ async function tryOverpassAPI(cityName: string): Promise<CityResponse | null> {
     return null;
   }
   
-  const cityNameOnly = parts[0].trim();
   const stateCode = parts[1].trim();
   
   try {
@@ -296,7 +295,7 @@ async function tryOverpassAPI(cityName: string): Promise<CityResponse | null> {
       source: 'overpass'
     };
     
-  } catch (error) {
+  } catch (_error) {
     return null;
   }
 }

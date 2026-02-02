@@ -150,7 +150,7 @@ export async function executeOverpassStrategies(cityName: string, stateCode: str
     if (result1.elements && result1.elements.length > 0) {
       return result1;
     }
-  } catch (error) {
+  } catch (_error) {
     // Strategy 1 failed, continue to next
   }
   
@@ -162,7 +162,7 @@ export async function executeOverpassStrategies(cityName: string, stateCode: str
     if (result2.elements && result2.elements.length > 0) {
       return result2;
     }
-  } catch (error) {
+  } catch (_error) {
     // Strategy 2 failed, continue to next
   }
   
@@ -174,7 +174,7 @@ export async function executeOverpassStrategies(cityName: string, stateCode: str
     if (result3.elements && result3.elements.length > 0) {
       return result3;
     }
-  } catch (error) {
+  } catch (_error) {
     // Strategy 3 failed
   }
   

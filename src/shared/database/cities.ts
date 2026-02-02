@@ -1,6 +1,6 @@
 // Database helper functions for cities and polygon zones
 import { supabaseServer } from '../config/supabaseServer';
-import type { City, YelpPolygonZone, CreateCityInput, CreatePolygonZoneInput } from '../types';
+import type { City, YelpPolygonZone, CreateCityInput, CreatePolygonZoneInput } from '../../lib/types';
 import { normalizeCityName, normalizeStateCode } from '../utils/cityNormalizer';
 
 /**

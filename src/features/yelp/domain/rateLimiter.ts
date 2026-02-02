@@ -1,5 +1,3 @@
-// Rate Limiter for Yelp API - handles throttling to prevent 503 errors
-// FIXED: Now properly throttles requests with minimum spacing between calls
 export class RateLimiter {
   private dailyCalls: number = 0;
   private lastReset: number = Date.now();
@@ -37,7 +35,6 @@ export class RateLimiter {
   }
 
   private canMakeRequest(): boolean {
-    const now = Date.now();
     
     // Check daily limit
     if (this.dailyCalls >= this.maxPerDay) {

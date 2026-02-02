@@ -1,8 +1,16 @@
 // Enhanced Yelp Search Engine - handles multi-point searches, pagination, and hexagon splitting
 import { yelpRateLimiter } from './rateLimiter';
-import { yelpQuotaManager } from '../utils/quotaManager';
-import { generateSearchPoints, validateCoverage, type HexagonCoverage } from '../hexagons/coverage';
-import { detectDenseHexagon, splitHexagon } from '../hexagons/splitter';
+import { yelpQuotaManager } from '@/shared/utils/quotaManager';
+import {
+  generateSearchPoints,
+  validateCoverage,
+  type HexagonCoverage,
+} from '@/shared/hexagons/coverage';
+import {
+  detectDenseHexagon,
+  splitHexagon,
+} from '@/shared/hexagons/splitter';
+
 import * as h3 from 'h3-js';
 
 export interface YelpBusiness {
@@ -296,7 +304,7 @@ export class YelpSearchEngine {
         // IMPORTANT: Queue child hexagons for subdivision processing
         // This is the critical integration point that was missing
         try {
-          const { hexagonProcessor } = await import('../hexagons/processor');
+          const { hexagonProcessor } = await import('@/shared/hexagons/processor');
           await hexagonProcessor.handleDenseHexagons(h3Id, totalBusinesses, 7);
         } catch (importError) {
           // Continue without subdivision - this is a fallback

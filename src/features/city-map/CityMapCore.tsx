@@ -3,7 +3,7 @@
 import { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet.markercluster';
-import type { EnhancedCityResponse } from '@/lib/geography/cityTypes';
+import type { EnhancedCityResponse } from '@/shared/geography/cityTypes';
 import type { YelpBusiness } from '@/lib/yelp/search';
 import type { YelpTestResult } from './index';
 
