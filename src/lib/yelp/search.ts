@@ -22,6 +22,7 @@ export interface YelpBusiness {
   phone: string;
   url: string;
   distance: number;
+  h3Id?: string; // H3 hexagon ID (populated for manual imports and cached data)
 }
 
 export interface YelpSearchResult {

@@ -1,6 +1,8 @@
 'use client';
 
-import { useState, useMemo, useEffect, useCallback } from 'react';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { parseRestaurantCSV, generateCsvContent, downloadCsv } from '@/lib/utils/csvParser';
+import { metersToMiles, detectFranchise, getStatusColor, getStatusIcon } from '@/lib/utils/restaurantUtils';
 
 // Define interfaces for Yelp testing state
 interface Restaurant {
@@ -28,6 +30,7 @@ interface HexagonResult {
   status: 'fetched' | 'failed' | 'dense' | 'split';
   totalBusinesses: number;
   uniqueBusinesses: Restaurant[];
+  searchResults: Restaurant[];
   coverageQuality: string;
   error?: string;
 }
@@ -59,9 +62,11 @@ interface YelpTestResult {
 interface RestaurantReviewPanelProps {
   yelpResults: YelpTestResult | null;
   cityName?: string;
+  onCacheReload?: () => Promise<void>;
+  setYelpResults?: (results: YelpTestResult | null) => void;
 }
 
-export default function RestaurantReviewPanel({ yelpResults, cityName }: RestaurantReviewPanelProps) {
+export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheReload, setYelpResults }: RestaurantReviewPanelProps) {
   const [expandedDetailsHexagons, setExpandedDetailsHexagons] = useState<Set<string>>(new Set());
   const [activeTab, setActiveTab] = useState<'summary' | 'details' | 'restaurants'>('summary');
   
@@ -119,6 +124,15 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
   // Add to existing state declarations (around line 64-110):
   const [importLogs, setImportLogs] = useState<any[]>([]);
   const [showImportHistory, setShowImportHistory] = useState(false);
+  const [deletingImportLogIds, setDeletingImportLogIds] = useState<Set<string>>(new Set());
+
+  // CSV import state
+  const [importMessage, setImportMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Track if restaurants have been persisted to staging DB
+  const [isPersistedToDb, setIsPersistedToDb] = useState(false);
 
   // FIX: Move early return check AFTER all hooks are called
   // All hooks must be called in the same order on every render
@@ -150,21 +164,33 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
   // This is needed because restaurants can come from multiple hexagons
   const restaurantToHexagonMap = useMemo(() => {
     const map = new Map<string, string>();
-    if (!yelpResults?.results) return map;
     
-    yelpResults.results.forEach(result => {
-      if (result.uniqueBusinesses) {
-        result.uniqueBusinesses.forEach(restaurant => {
-          // If restaurant appears in multiple hexagons, keep the first one
-          if (!map.has(restaurant.id)) {
-            map.set(restaurant.id, result.h3Id);
-          }
-        });
-      }
-    });
+    // Add from results (Yelp search data)
+    if (yelpResults?.results) {
+      yelpResults.results.forEach(result => {
+        if (result.uniqueBusinesses) {
+          result.uniqueBusinesses.forEach(restaurant => {
+            // If restaurant appears in multiple hexagons, keep the first one
+            if (!map.has(restaurant.id)) {
+              map.set(restaurant.id, result.h3Id);
+            }
+          });
+        }
+      });
+    }
+    
+    // Add from newBusinesses (includes manual imports with h3Id)
+    if (yelpResults?.newBusinesses) {
+      yelpResults.newBusinesses.forEach(restaurant => {
+        const h3Id = (restaurant as any).h3Id;
+        if (h3Id && !map.has(restaurant.id)) {
+          map.set(restaurant.id, h3Id);
+        }
+      });
+    }
     
     return map;
-  }, [yelpResults?.results]);
+  }, [yelpResults?.results, yelpResults?.newBusinesses]);
 
   // Get restaurant counts
   const getRestaurantCounts = () => {
@@ -182,56 +208,6 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
     const total = allBusinesses.length; // Total including duplicates across hexagons
     const unique = getAllRestaurants().length; // After deduplication
     return { total, unique };
-  };
-  
-  // Convert meters to miles
-  const metersToMiles = (meters: number): string => {
-    const miles = meters / 1609.34;
-    return miles.toFixed(1);
-  };
-  
-  // Franchise detection with strict regex and word boundaries
-  // This function detects major restaurant chains using precise pattern matching
-  // to minimize false positives while catching common franchise variations
-  const detectFranchise = (restaurantName: string): boolean => {
-    if (!restaurantName) return false;
-    
-    // Normalize: lowercase, remove apostrophes and special quotes
-    const normalized = restaurantName.toLowerCase().replace(/['']/g, '');
-    
-    // Franchise patterns with word boundaries - covers major chains
-    // Each pattern uses \b for word boundaries to avoid false matches
-    const franchisePatterns = [
-      // Fast Food - Burgers
-      /\b(mcdonald'?s?|burger\s+king|wendy'?s?|five\s+guys|in-n-out|shake\s+shack|smashburger|white\s+castle)\b/,
-      
-      // Fast Food - Sandwiches & Subs
-      /\b(subway|jimmy\s+john'?s?|jersey\s+mike'?s?|firehouse\s+subs?|quiznos|potbelly)\b/,
-      
-      // Fast Food - Chicken
-      /\b(chick-fil-a|chickfila|kfc|kentucky\s+fried|popeye'?s?|raising\s+cane'?s?|wingstop|buffalo\s+wild\s+wings?)\b/,
-      
-      // Fast Food - Mexican
-      /\b(taco\s+bell|chipotle|qdoba|del\s+taco|taco\s+cabana|moe'?s?\s+southwest)\b/,
-      
-      // Fast Food - Pizza
-      /\b(pizza\s+hut|domino'?s?|papa\s+john'?s?|little\s+caesars?|marco'?s?\s+pizza|papa\s+murphy'?s?)\b/,
-      
-      // Fast Food - Other
-      /\b(panda\s+express|arby'?s?|sonic\s+drive-in|sonic|dairy\s+queen|culver'?s?|portillo'?s?)\b/,
-      
-      // Coffee & Breakfast
-      /\b(starbucks|dunkin'?(\s+donuts)?|tim\s+hortons?|panera\s+bread|ihop|denny'?s?|waffle\s+house|cracker\s+barrel)\b/,
-      
-      // Casual Dining
-      /\b(applebee'?s?|chili'?s?|olive\s+garden|red\s+lobster|outback\s+steakhouse|texas\s+roadhouse|longhorn\s+steakhouse)\b/,
-      
-      // Fast Casual & Modern Chains
-      /\b(cava|sweetgreen|blaze\s+pizza|mod\s+pizza|&pizza|pieology)\b/,
-    ];
-    
-    // Test against all patterns
-    return franchisePatterns.some(pattern => pattern.test(normalized));
   };
   
   // Calculate filter statistics
@@ -272,23 +248,273 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
     };
   };
   
-  // Helper function to update import log counts optimistically
-  const updateImportLogCounts = useCallback((
-    importLogId: string, 
-    stagedDelta: number = 0
-  ) => {
-    if (stagedDelta === 0 || !importLogId) return;
+  /**
+   * Detect duplicates between two restaurant arrays
+   * Matches by case-insensitive name AND address
+   */
+  const findDuplicates = useCallback((
+    existingRestaurants: Restaurant[],
+    newRestaurants: Restaurant[]
+  ): { duplicates: string[]; uniqueNew: Restaurant[] } => {
+    const duplicates: string[] = [];
+    const uniqueNew: Restaurant[] = [];
     
-    setImportLogs(prev => prev.map(log => 
-      log.id === importLogId
-        ? {
-            ...log,
-            restaurants_staged: Math.max(0, (log.restaurants_staged || 0) + stagedDelta)
-          }
-        : log
-    ));
+    // Create lookup map of existing restaurants (lowercase name + address)
+    const existingMap = new Map<string, Restaurant>();
+    existingRestaurants.forEach(r => {
+      const key = `${r.name.toLowerCase().trim()}|${r.location?.address1?.toLowerCase().trim() || ''}`;
+      existingMap.set(key, r);
+    });
+    
+    // Check each new restaurant
+    newRestaurants.forEach(newR => {
+      const key = `${newR.name.toLowerCase().trim()}|${newR.location?.address1?.toLowerCase().trim() || ''}`;
+      if (existingMap.has(key)) {
+        duplicates.push(newR.name);
+      } else {
+        uniqueNew.push(newR);
+      }
+    });
+    
+    return { duplicates, uniqueNew };
   }, []);
-  
+
+  // Handle CSV file upload for manual restaurant import
+  const handleFileUpload = async (file: File) => {
+    // Validation 1: File size (5MB max)
+    if (file.size > 5 * 1024 * 1024) {
+      setImportMessage({
+        type: 'error',
+        text: 'File too large. Maximum size is 5MB.'
+      });
+      setTimeout(() => setImportMessage(null), 5000);
+      return;
+    }
+
+    // Validation 2: File type (CSV only)
+    if (!file.name.endsWith('.csv')) {
+      setImportMessage({
+        type: 'error',
+        text: 'Invalid file type. Please upload a CSV file.'
+      });
+      setTimeout(() => setImportMessage(null), 5000);
+      return;
+    }
+
+    // Validation 3: Must have Yelp results first
+    if (!yelpResults || !yelpResults.cityId) {
+      setImportMessage({
+        type: 'error',
+        text: 'Please run a Yelp search first before importing restaurants.'
+      });
+      setTimeout(() => setImportMessage(null), 5000);
+      return;
+    }
+
+    setIsImporting(true);
+    setImportMessage(null);
+
+    try {
+      // Parse CSV using our parser
+      const parseResult = await parseRestaurantCSV(file);
+
+      if (parseResult.restaurants.length === 0) {
+        setImportMessage({
+          type: 'error',
+          text: 'No valid restaurants found in CSV file.'
+        });
+        setIsImporting(false);
+        return;
+      }
+
+      // Show parsing errors if any (non-fatal)
+      if (parseResult.errors.length > 0) {
+        const errorPreview = parseResult.errors.slice(0, 3).join('; ');
+        const moreErrors = parseResult.errors.length > 3
+          ? ` ... and ${parseResult.errors.length - 3} more error${parseResult.errors.length - 3 === 1 ? '' : 's'}` 
+          : '';
+        
+        setImportMessage({
+          type: 'error',
+          text: `CSV has ${parseResult.errors.length} error(s): ${errorPreview}${moreErrors}`
+        });
+        setTimeout(() => setImportMessage(null), 10000);
+      }
+
+      // Send to backend for H3 ID calculation (no DB save)
+      const response = await fetch('/api/yelp/staging', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'manual-import',
+          restaurants: parseResult.restaurants,
+          cityId: yelpResults.cityId
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server error: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      if (data.success && data.restaurants) {
+        const restaurantsWithH3 = data.restaurants;
+        
+        // Check for duplicates against current state
+        const currentRestaurants = getAllRestaurants();
+        const { duplicates, uniqueNew } = findDuplicates(currentRestaurants, restaurantsWithH3);
+        
+        if (duplicates.length > 0) {
+          // Show duplicate warning
+          const dupePreview = duplicates.slice(0, 3).join(', ');
+          const moreDupes = duplicates.length > 3 ? ` and ${duplicates.length - 3} more` : '';
+          
+          setImportMessage({
+            type: 'error',
+            text: `Found ${duplicates.length} duplicate${duplicates.length === 1 ? '' : 's'}: ${dupePreview}${moreDupes}. Only unique restaurants will be added.`
+          });
+          setTimeout(() => setImportMessage(null), 8000);
+        }
+        
+        if (uniqueNew.length === 0) {
+          setImportMessage({
+            type: 'error',
+            text: 'All restaurants in CSV are duplicates. No new restaurants to import.'
+          });
+          setTimeout(() => setImportMessage(null), 5000);
+          setIsImporting(false);
+          return;
+        }
+        
+        // Merge unique new restaurants into state
+        const updatedRestaurants = [...currentRestaurants, ...uniqueNew];
+        
+        // Update yelpResults with merged restaurants
+        if (yelpResults && setYelpResults) {
+          const updatedResults = {
+            ...yelpResults,
+            newBusinesses: updatedRestaurants
+          };
+          setYelpResults(updatedResults);
+        }
+        
+        setImportMessage({
+          type: 'success',
+          text: `Successfully imported ${uniqueNew.length} restaurant${uniqueNew.length === 1 ? '' : 's'}${duplicates.length > 0 ? ` (${duplicates.length} duplicate${duplicates.length === 1 ? '' : 's'} skipped)` : ''}!`
+        });
+        setTimeout(() => setImportMessage(null), 5000);
+
+      } else {
+        setImportMessage({
+          type: 'error',
+          text: data.message || 'Failed to process restaurants.'
+        });
+        setTimeout(() => setImportMessage(null), 5000);
+      }
+    } catch (error) {
+      console.error('CSV import error:', error);
+      setImportMessage({
+        type: 'error',
+        text: 'An error occurred while importing CSV file.'
+      });
+      setTimeout(() => setImportMessage(null), 5000);
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  /**
+   * Batch save all restaurants from state to DB
+   * Called on first approve/reject action
+   */
+  const batchSaveAllToDb = useCallback(async (): Promise<boolean> => {
+    if (isPersistedToDb) {
+      console.log('Restaurants already persisted to DB, skipping batch save');
+      return true; // Already saved
+    }
+    
+    if (!yelpResults?.importLogId || !yelpResults?.cityId) {
+      console.error('Missing import log ID or city ID for batch save');
+      return false;
+    }
+    
+    const allRestaurants = getAllRestaurants();
+    if (allRestaurants.length === 0) {
+      console.log('No restaurants to save');
+      return true;
+    }
+    
+    console.log(`💾 Batch saving ${allRestaurants.length} restaurants to staging DB...`);
+    
+    // Group by hexagon
+    const restaurantsByHexagon = new Map<string, Restaurant[]>();
+    allRestaurants.forEach(restaurant => {
+      const h3Id = restaurantToHexagonMap.get(restaurant.id);
+      if (h3Id) {
+        if (!restaurantsByHexagon.has(h3Id)) {
+          restaurantsByHexagon.set(h3Id, []);
+        }
+        restaurantsByHexagon.get(h3Id)!.push(restaurant);
+      } else {
+        console.warn(`Restaurant ${restaurant.id} (${restaurant.name}) has no hexagon assignment, skipping`);
+      }
+    });
+    
+    // Save each hexagon group
+    let totalSaved = 0;
+    let totalErrors = 0;
+    
+    for (const [h3Id, restaurants] of restaurantsByHexagon.entries()) {
+      try {
+        const response = await fetch('/api/yelp/staging', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'bulk-create',
+            restaurants,
+            h3Id,
+            cityId: yelpResults.cityId,
+            importLogId: yelpResults.importLogId,
+          }),
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+          totalSaved += data.createdCount || 0;
+        } else {
+          totalErrors += restaurants.length;
+          console.error(`Failed to save hexagon ${h3Id}:`, data.message);
+        }
+      } catch (error) {
+        console.error(`Error saving hexagon ${h3Id}:`, error);
+        totalErrors += restaurants.length;
+      }
+    }
+    
+    if (totalSaved > 0) {
+      console.log(`✅ Batch saved ${totalSaved} restaurants to DB`);
+      setIsPersistedToDb(true);
+      return true;
+    } else {
+      console.error(`❌ Failed to save restaurants to DB (${totalErrors} errors)`);
+      return false;
+    }
+  }, [isPersistedToDb, yelpResults, getAllRestaurants, restaurantToHexagonMap]);
+
+  // Helper to trigger file upload when input changes
+  const handleFileInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      handleFileUpload(file);
+    }
+    // Reset input so same file can be selected again
+    if (event.target) {
+      event.target.value = '';
+    }
+  };
+
   // Handle restaurant approval/rejection
   const handleRestaurantReview = async (restaurantId: string, status: 'approved' | 'rejected') => {
     // Rejection is a no-op - we just track it in UI, don't save to staging
@@ -305,80 +531,61 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
       return;
     }
 
-    // For approval, we need to create the staging record
+    // For approval, we need to batch save ALL restaurants first (if not already saved)
     try {
       setUpdatingRestaurantIds(prev => new Set(prev).add(restaurantId));
       
-      // Get restaurant object and its hexagon
+      // BATCH SAVE on first approve/reject
+      if (!isPersistedToDb) {
+        setReviewMessage({ 
+          type: 'info', 
+          text: 'Saving all restaurants to staging database...' 
+        });
+        
+        const saveSuccess = await batchSaveAllToDb();
+        
+        if (!saveSuccess) {
+          throw new Error('Failed to save restaurants to database');
+        }
+        
+        setReviewMessage({ 
+          type: 'success', 
+          text: 'All restaurants saved! Now marking as approved...' 
+        });
+      }
+      
+      // Get restaurant object
       const restaurant = getAllRestaurants().find(r => r.id === restaurantId);
       if (!restaurant) {
         throw new Error('Restaurant not found');
       }
 
-      const h3Id = restaurantToHexagonMap.get(restaurantId);
-      if (!h3Id) {
-        throw new Error('Could not determine hexagon for restaurant');
-      }
-
-      if (!yelpResults?.importLogId || !yelpResults?.cityId) {
-        throw new Error('Missing import log ID or city ID. Please run a new search.');
-      }
-
+      // Now update the specific restaurant status to 'approved'
       const response = await fetch('/api/yelp/staging', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'bulk-create',
-          restaurants: [restaurant],
-          h3Id,
-          cityId: yelpResults.cityId,
-          importLogId: yelpResults.importLogId,
-        }),
+          action: 'update-status',
+          yelpId: restaurantId,
+          status: 'approved'
+        })
       });
       
       const data = await response.json();
       
-      if (!response.ok || !data.success) {
-        // Check if it's a duplicate
-        if (data.duplicates && data.duplicates.length > 0) {
-          const duplicateInfo = data.duplicates[0];
-          setReviewMessage({ 
-            type: 'warning', 
-            text: `Restaurant already exists in city ${duplicateInfo.cityId} (Yelp ID: ${duplicateInfo.yelpId})` 
-          });
-          // Still mark as reviewed so user doesn't try again
-          setReviewedRestaurantIds(prev => new Set(prev).add(restaurantId));
-          setReviewedRestaurantStatus(prev => new Map(prev).set(restaurantId, 'duplicate'));
-          setTimeout(() => setReviewMessage(null), 5000);
-        } else {
-          throw new Error(data.message || 'Failed to create restaurant in staging');
-        }
-      } else {
-        // Success - update local import log state optimistically
-        if (yelpResults?.importLogId && data.createdCount > 0) {
-          updateImportLogCounts(yelpResults.importLogId, data.createdCount);
-        }
-        
-        // Success - check for partial duplicates
-        if (data.duplicates && data.duplicates.length > 0) {
-          setReviewMessage({ 
-            type: 'info', 
-            text: `Saved to staging, but restaurant also exists in ${data.duplicates.length} other location${data.duplicates.length === 1 ? '' : 's'}` 
-          });
-        } else {
-          setReviewMessage({ 
-            type: 'success', 
-            text: `Successfully approved and saved restaurant to staging` 
-          });
-        }
-        setTimeout(() => setReviewMessage(null), 3000);
-        
-        // Track the review status
-        setReviewedRestaurantIds(prev => new Set(prev).add(restaurantId));
-        setReviewedRestaurantStatus(prev => new Map(prev).set(restaurantId, status));
+      if (!data.success) {
+        throw new Error(data.message || 'Failed to update status');
       }
+      
+      // Mark as reviewed in UI
+      setReviewedRestaurantIds(prev => new Set(prev).add(restaurantId));
+      setReviewedRestaurantStatus(prev => new Map(prev).set(restaurantId, 'approved'));
+      
+      setReviewMessage({ 
+        type: 'success', 
+        text: 'Restaurant approved and saved to staging!' 
+      });
+      setTimeout(() => setReviewMessage(null), 3000);
       
       // Remove from selection if selected
       setSelectedRestaurantIds(prev => {
@@ -418,7 +625,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
 
     const selectedRestaurants = getAllRestaurants().filter(r => selectedIds.includes(r.id));
     
-    // CSV header
+    // Build CSV data using imported utilities
     const headers = ['Name', 'Rating', 'Price', 'Category', 'Address', 'City', 'State', 'Zip Code', 'Phone', 'Distance (miles)', 'Yelp URL'];
     const rows = selectedRestaurants.map(r => [
       r.name || '',
@@ -434,28 +641,9 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
       r.url || ''
     ]);
     
-    // Escape CSV values
-    const escapeCsv = (value: string) => {
-      if (value.includes(',') || value.includes('"') || value.includes('\n')) {
-        return `"${value.replace(/"/g, '""')}"`;
-      }
-      return value;
-    };
-    
-    const csvContent = [
-      headers.map(escapeCsv).join(','),
-      ...rows.map(row => row.map(escapeCsv).join(','))
-    ].join('\n');
-    
-    const dataBlob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(dataBlob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `restaurants_${new Date().toISOString().split('T')[0]}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    // Use imported CSV utilities
+    const csvContent = generateCsvContent(headers, rows);
+    downloadCsv(csvContent, `restaurants_${new Date().toISOString().split('T')[0]}`);
     
     setReviewMessage({ 
       type: 'success', 
@@ -522,69 +710,58 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
         return next;
       });
 
+      // BATCH SAVE on first approve/reject
+      if (!isPersistedToDb) {
+        setReviewMessage({ 
+          type: 'info', 
+          text: 'Saving all restaurants to staging database...' 
+        });
+        
+        const saveSuccess = await batchSaveAllToDb();
+        
+        if (!saveSuccess) {
+          throw new Error('Failed to save restaurants to database');
+        }
+      }
+
       if (!yelpResults?.importLogId || !yelpResults?.cityId) {
         throw new Error('Missing import log ID or city ID. Please run a new search.');
       }
 
-      // Get all selected restaurants
-      const allRestaurants = getAllRestaurants();
-      const selectedRestaurants = allRestaurants.filter(r => selectedIds.includes(r.id));
-      
-      // Group restaurants by hexagon (h3Id)
-      const restaurantsByHexagon = new Map<string, Restaurant[]>();
-      selectedRestaurants.forEach(restaurant => {
-        const h3Id = restaurantToHexagonMap.get(restaurant.id);
-        if (h3Id) {
-          if (!restaurantsByHexagon.has(h3Id)) {
-            restaurantsByHexagon.set(h3Id, []);
-          }
-          restaurantsByHexagon.get(h3Id)!.push(restaurant);
-        }
+      // Update status for all selected restaurants (they're already in DB from batch save)
+      const response = await fetch('/api/yelp/staging', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'bulk-update-status',
+          yelpIds: selectedIds,
+          status: 'approved'
+        })
       });
-
-      // Create staging records for each hexagon group
+      
+      const data = await response.json();
+      
       let totalCreated = 0;
-      let totalSkipped = 0;
       let totalErrors = 0;
       const errors: string[] = [];
-
-      for (const [h3Id, restaurants] of restaurantsByHexagon.entries()) {
-        try {
-          const response = await fetch('/api/yelp/staging', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              action: 'bulk-create',
-              restaurants,
-              h3Id,
-              cityId: yelpResults.cityId,
-              importLogId: yelpResults.importLogId,
-            }),
-          });
-          
-          const data = await response.json();
-          
-          if (response.ok && data.success) {
-            totalCreated += data.createdCount || 0;
-            totalSkipped += data.skippedCount || 0;
-            totalErrors += data.errorCount || 0;
-            
-            // Update progress
-            setBulkProgress({
-              processed: totalCreated,
-              total: selectedIds.length,
-              isActive: true
-            });
-          } else {
-            totalErrors += restaurants.length;
-            errors.push(`Failed to save ${restaurants.length} restaurants from hexagon ${h3Id}: ${data.message || 'Unknown error'}`);
-          }
-        } catch (error) {
-          totalErrors += restaurants.length;
-          errors.push(`Error saving ${restaurants.length} restaurants from hexagon ${h3Id}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      
+      if (response.ok && data.success) {
+        totalCreated = data.successCount || 0;
+        totalErrors = data.failedCount || 0;
+        
+        if (data.failedIds && data.failedIds.length > 0) {
+          errors.push(`Failed to update ${data.failedIds.length} restaurant(s)`);
         }
+        
+        // Update progress
+        setBulkProgress({
+          processed: totalCreated,
+          total: selectedIds.length,
+          isActive: true
+        });
+      } else {
+        totalErrors = selectedIds.length;
+        errors.push(`Failed to update restaurant statuses: ${data.message || 'Unknown error'}`);
       }
       
       // Track reviewed restaurants and their status
@@ -611,27 +788,17 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
       
       // Show success/error message
       if (totalCreated > 0 && errors.length === 0) {
-        // Update local import log state optimistically
-        if (yelpResults?.importLogId && totalCreated > 0) {
-          updateImportLogCounts(yelpResults.importLogId, totalCreated);
-        }
-        
         setReviewMessage({ 
           type: 'success', 
-          text: `Successfully approved and saved ${totalCreated} restaurant${totalCreated === 1 ? '' : 's'} to staging${totalSkipped > 0 ? ` (${totalSkipped} duplicates skipped)` : ''}` 
+          text: `Successfully approved ${totalCreated} restaurant${totalCreated === 1 ? '' : 's'}!` 
         });
       } else if (totalCreated > 0) {
-        // Partial success - still update counts
-        if (yelpResults?.importLogId && totalCreated > 0) {
-          updateImportLogCounts(yelpResults.importLogId, totalCreated);
-        }
-        
         setReviewMessage({ 
           type: 'error', 
-          text: `Partially completed: ${totalCreated} saved, ${totalErrors} failed. ${errors.slice(0, 2).join('; ')}` 
+          text: `Partially completed: ${totalCreated} approved, ${totalErrors} failed. ${errors.slice(0, 2).join('; ')}` 
         });
       } else {
-        throw new Error(`Failed to save any restaurants. ${errors.join('; ')}`);
+        throw new Error(`Failed to approve any restaurants. ${errors.join('; ')}`);
       }
       setTimeout(() => setReviewMessage(null), 6000);
       
@@ -1004,6 +1171,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
     setReviewedRestaurantIds(new Set());
     setReviewedRestaurantStatus(new Map());
     setSelectedRestaurantIds(new Set());
+    setIsPersistedToDb(false); // Reset persistence flag
   }, [yelpResults]);
 
   // Fetch all import logs when we have yelpResults (cached or fresh)
@@ -1015,6 +1183,40 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
         .catch(console.error);
     }
   }, [yelpResults]);
+
+  const handleDeleteImportLog = async (logId: string) => {
+    if (!logId) return;
+    if (!window.confirm('Delete this import log and all related staged data? This cannot be undone.')) {
+      return;
+    }
+
+    setDeletingImportLogIds(prev => new Set(prev).add(logId));
+    try {
+      const response = await fetch(`/api/yelp/import-logs?id=${encodeURIComponent(logId)}`, {
+        method: 'DELETE'
+      });
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.message || 'Failed to delete import log');
+      }
+
+      setImportLogs(prev => prev.filter(log => log.id !== logId));
+    } catch (error) {
+      console.error('Failed to delete import log:', error);
+      setImportMessage({
+        type: 'error',
+        text: 'Failed to delete import log. Check console for details.'
+      });
+      setTimeout(() => setImportMessage(null), 5000);
+    } finally {
+      setDeletingImportLogIds(prev => {
+        const next = new Set(prev);
+        next.delete(logId);
+        return next;
+      });
+    }
+  };
 
   // FIX: Early return check moved AFTER all hooks (useState, useMemo, useEffect)
   // This ensures hooks are always called in the same order
@@ -1047,26 +1249,6 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
       unique: uniqueBusinesses.length,
       duplicates: allBusinesses.length - uniqueBusinesses.length
     };
-  };
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'fetched': return 'text-green-600 bg-green-100';
-      case 'failed': return 'text-red-600 bg-red-100';
-      case 'dense': return 'text-yellow-600 bg-yellow-100';
-      case 'split': return 'text-blue-600 bg-blue-100';
-      default: return 'text-gray-600 bg-gray-100';
-    }
-  };
-
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case 'fetched': return '✅';
-      case 'failed': return '❌';
-      case 'dense': return '🔀';
-      case 'split': return '📊';
-      default: return '❓';
-    }
   };
 
   return (
@@ -1334,10 +1516,20 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
                             <span className={`font-medium ${log.status === 'complete' ? 'text-green-600' : log.status === 'running' ? 'text-orange-500' : 'text-red-600'}`}>
                               {log.status === 'complete' ? '✅' : log.status === 'running' ? '⏳' : '❌'} {new Date(log.created_at).toLocaleDateString()}
                             </span>
-                            <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded">
-                              {log.processed_tiles}/{log.total_tiles} tiles
-                              {(log.tiles_cached > 0) && ` (${log.tiles_cached} cached)`}
-                            </span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded">
+                                {log.processed_tiles}/{log.total_tiles} tiles
+                                {(log.tiles_cached > 0) && ` (${log.tiles_cached} cached)`}
+                              </span>
+                              <button
+                                onClick={() => handleDeleteImportLog(log.id)}
+                                disabled={deletingImportLogIds.has(log.id)}
+                                className="text-xs font-semibold text-red-600 hover:text-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="Delete this import log and related staged data"
+                              >
+                                {deletingImportLogIds.has(log.id) ? 'Deleting…' : 'Delete'}
+                              </button>
+                            </div>
                           </div>
                           {log.cities && (
                             <div className="text-xs text-slate-500 italic">
@@ -1353,6 +1545,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
                             <span>📥 Fetched: {log.restaurants_fetched || 0}</span>
                             <span>🔄 Unique: {log.restaurants_unique || 0}</span>
                             <span>💾 Staged: {log.restaurants_staged || 0}</span>
+                            <span>🧩 Total tiles: {log.total_tiles || 0}</span>
                           </div>
                           {log.duplicates_existing > 0 && (
                             <div className="text-xs text-slate-400">
@@ -1495,25 +1688,34 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
 
           {activeTab === 'restaurants' && (
             <div className="space-y-3">
-              {/* Review message */}
-              {reviewMessage && (
-                <div className={`p-4 rounded-xl shadow-lg animate-pulse ${
-                  reviewMessage.type === 'success' 
-                    ? 'bg-gradient-to-r from-green-50 to-emerald-50 border-2 border-green-300 text-green-800' 
-                    : reviewMessage.type === 'error'
-                    ? 'bg-gradient-to-r from-red-50 to-rose-50 border-2 border-red-300 text-red-800'
-                    : reviewMessage.type === 'warning'
-                    ? 'bg-gradient-to-r from-yellow-50 to-amber-50 border-2 border-yellow-300 text-yellow-800'
-                    : 'bg-gradient-to-r from-blue-50 to-cyan-50 border-2 border-blue-300 text-blue-800'
-                }`}>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xl">
-                      {reviewMessage.type === 'success' ? '✓' : reviewMessage.type === 'error' ? '✗' : reviewMessage.type === 'warning' ? '⚠️' : 'ℹ️'}
-                    </span>
-                    <span className="font-semibold">{reviewMessage.text}</span>
+              {/* Review/Import message */}
+              {(() => {
+                const message = reviewMessage || importMessage;
+                if (!message) return null;
+
+                const getMessageIcon = () => {
+                  if (message.type === 'success') return '✓';
+                  if (message.type === 'error') return '✗';
+                  if (message.type === 'warning') return '⚠️';
+                  return 'ℹ️';
+                };
+
+                const getMessageClassName = () => {
+                  if (message.type === 'success') return 'bg-gradient-to-r from-green-50 to-emerald-50 border-2 border-green-300 text-green-800';
+                  if (message.type === 'error') return 'bg-gradient-to-r from-red-50 to-rose-50 border-2 border-red-300 text-red-800';
+                  if (message.type === 'warning') return 'bg-gradient-to-r from-yellow-50 to-amber-50 border-2 border-yellow-300 text-yellow-800';
+                  return 'bg-gradient-to-r from-blue-50 to-cyan-50 border-2 border-blue-300 text-blue-800';
+                };
+
+                return (
+                  <div className={`p-4 rounded-xl shadow-lg animate-pulse ${getMessageClassName()}`}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl">{getMessageIcon()}</span>
+                      <span className="font-semibold">{message.text}</span>
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
               
               {/* Phase 5: Progress Indicator */}
               {bulkProgress.isActive && bulkProgress.total > 0 && (
@@ -1920,6 +2122,22 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
                             )}
                           </button>
 
+                          {/* Import CSV Button - Manual Import */}
+                          <button
+                            onClick={() => fileInputRef.current?.click()}
+                            disabled={isImporting || !yelpResults?.cityId}
+                            className="px-3 py-2 bg-gradient-to-r from-indigo-500 to-purple-600 text-white text-[11px] font-bold rounded-lg hover:from-indigo-600 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-sm hover:shadow-md transform hover:scale-[1.01] active:scale-95"
+                            title="Import restaurants from CSV file"
+                          >
+                            {isImporting ? (
+                              <span className="flex items-center gap-1">
+                                <span className="animate-spin">⏳</span> Importing...
+                              </span>
+                            ) : (
+                              '📥 Import CSV'
+                            )}
+                          </button>
+
                           {/* Export Button - CSV Only */}
                           {selectionStats.totalSelected > 0 && (
                             <button
@@ -2090,13 +2308,23 @@ export default function RestaurantReviewPanel({ yelpResults, cityName }: Restaur
                     >
                       Clear Search
                     </button>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
+                  )}  // Clear Search button conditional
+                </div>  // No restaurants found div
+              )}  // conditional wrapper
+
+            {/* Hidden file input for CSV import */}
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileInputChange}
+              accept=".csv"
+              className="hidden"
+              aria-label="Upload CSV file"
+            />
+          </div>  // Close restaurants content div (line 1616)
+        )}  // Close restaurants tab (line 1615)
+      </div>  // Close tab content div (line 1259)
+    </div>  // Close white box div (line 1194)
+  </div>  // Close main container div (line 1192)
   );
 }

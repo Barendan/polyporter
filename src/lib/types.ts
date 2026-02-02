@@ -68,6 +68,7 @@ export interface YelpImportLog {
   restaurants_unique: number;            // After cross-hexagon deduplication
   restaurants_staged: number;            // Saved to staging table
   duplicates_existing: number;           // Already in DB from previous imports
+  is_manual?: boolean;                // ✅ NEW: true = manual CSV import, false/null = Yelp API import
   
   created_at: string;
   updated_at: string;

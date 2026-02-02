@@ -6,6 +6,7 @@ export interface CreateImportLogInput {
   city_id?: string;
   total_tiles: number;                   // Original city hexagon count
   estimated_api_calls: number;
+  is_manual?: boolean;                // true = manual CSV import, false/null = Yelp API import
 }
 
 export interface UpdateImportLogInput {
@@ -39,6 +40,7 @@ export async function createImportLog(logData: CreateImportLogInput): Promise<st
         restaurants_unique: 0,
         restaurants_staged: 0,
         duplicates_existing: 0,
+        is_manual: logData.is_manual ?? false,  // Use is_manual flag to distinguish manual vs Yelp imports
       })
       .select('id')
       .single();
@@ -54,7 +56,7 @@ export async function createImportLog(logData: CreateImportLogInput): Promise<st
       return null;
     }
 
-    console.log(`✅ Successfully created import log: ${data.id}`);
+    console.log(`✅ Successfully created import log: ${data.id}${logData.is_manual ? ' (manual import)' : ''}`);
     return data.id;
   } catch (error) {
     console.error('❌ Exception creating import log in database:', {
@@ -106,77 +108,61 @@ export async function updateImportLog(
 }
 
 
+// Valid fields that can be incremented on import logs
+type IncrementableField = 'restaurants_staged' | 'duplicates_existing' | 'restaurants_fetched' | 'restaurants_unique';
+
 /**
- * Increment the staged count for an import log
- * Used when restaurants are saved to staging
+ * Generic function to increment a numeric field on an import log
+ * DRY helper used by incrementStagedCount and incrementDuplicatesCount
  */
-export async function incrementStagedCount(
+async function incrementField(
   logId: string,
+  field: IncrementableField,
   count: number
 ): Promise<boolean> {
   try {
     const { data: current } = await supabaseServer
       .from('yelp_import_logs')
-      .select('restaurants_staged')
+      .select(field)
       .eq('id', logId)
       .single();
 
     if (!current) {
-      console.error('❌ Import log not found for increment staged count:', logId);
+      console.error(`❌ Import log not found for increment ${field}:`, logId);
       return false;
     }
 
+    const currentValue = (current as Record<string, number | null>)[field] || 0;
     const { error } = await supabaseServer
       .from('yelp_import_logs')
-      .update({ restaurants_staged: (current.restaurants_staged || 0) + count })
+      .update({ [field]: currentValue + count })
       .eq('id', logId);
 
     if (error) {
-      console.error('❌ Error incrementing staged count:', error);
+      console.error(`❌ Error incrementing ${field}:`, error);
       return false;
     }
 
     return true;
   } catch (error) {
-    console.error('❌ Exception incrementing staged count:', error);
+    console.error(`❌ Exception incrementing ${field}:`, error);
     return false;
   }
 }
 
 /**
+ * Increment the staged count for an import log
+ * Used when restaurants are saved to staging
+ */
+export async function incrementStagedCount(logId: string, count: number): Promise<boolean> {
+  return incrementField(logId, 'restaurants_staged', count);
+}
+
+/**
  * Increment the duplicates count for an import log
  */
-export async function incrementDuplicatesCount(
-  logId: string,
-  count: number
-): Promise<boolean> {
-  try {
-    const { data: current } = await supabaseServer
-      .from('yelp_import_logs')
-      .select('duplicates_existing')
-      .eq('id', logId)
-      .single();
-
-    if (!current) {
-      console.error('❌ Import log not found for increment duplicates count:', logId);
-      return false;
-    }
-
-    const { error } = await supabaseServer
-      .from('yelp_import_logs')
-      .update({ duplicates_existing: (current.duplicates_existing || 0) + count })
-      .eq('id', logId);
-
-    if (error) {
-      console.error('❌ Error incrementing duplicates count:', error);
-      return false;
-    }
-
-    return true;
-  } catch (error) {
-    console.error('❌ Exception incrementing duplicates count:', error);
-    return false;
-  }
+export async function incrementDuplicatesCount(logId: string, count: number): Promise<boolean> {
+  return incrementField(logId, 'duplicates_existing', count);
 }
 
 

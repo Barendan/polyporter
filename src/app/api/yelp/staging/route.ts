@@ -3,17 +3,98 @@ import { NextRequest, NextResponse } from 'next/server';
 import { batchCreateYelpStaging, bulkUpdateStagingStatus, updateStagingStatus } from '@/lib/database/yelpStaging';
 import { supabaseServer } from '@/lib/config/supabaseServer';
 import type { YelpBusiness } from '@/lib/yelp/search';
-import type { YelpStagingStatus } from '@/lib/types';
+import type { YelpStagingStatus, YelpHextileStatus } from '@/lib/types';
+
+// ============================================================================
+// SHARED VALIDATION HELPERS (DRY)
+// ============================================================================
 
 /**
- * Helper function to update hex tile staged count from actual database count
+ * Validate restaurants array - shared between bulk-create and manual-import
+ */
+function validateRestaurantsArray(restaurants: unknown): { valid: false; response: NextResponse } | { valid: true } {
+  if (!restaurants || !Array.isArray(restaurants) || restaurants.length === 0) {
+    return {
+      valid: false,
+      response: NextResponse.json(
+        { success: false, message: 'Invalid restaurants: must be a non-empty array' },
+        { status: 400 }
+      )
+    };
+  }
+  return { valid: true };
+}
+
+/**
+ * Validate cityId - shared between bulk-create and manual-import
+ */
+function validateCityId(cityId: unknown): { valid: false; response: NextResponse } | { valid: true } {
+  if (!cityId || typeof cityId !== 'string' || cityId.trim().length === 0) {
+    return {
+      valid: false,
+      response: NextResponse.json(
+        { success: false, message: 'Invalid cityId: must be a non-empty string' },
+        { status: 400 }
+      )
+    };
+  }
+  return { valid: true };
+}
+
+/**
+ * Validate restaurant IDs in array - shared between bulk-create and manual-import
+ */
+function validateRestaurantIds(restaurants: any[]): { valid: false; response: NextResponse } | { valid: true } {
+  const invalidRestaurants = restaurants.filter(
+    (r: any) => !r || !r.id || typeof r.id !== 'string' || r.id.trim().length === 0
+  );
+  if (invalidRestaurants.length > 0) {
+    return {
+      valid: false,
+      response: NextResponse.json(
+        { success: false, message: `Invalid restaurants found: ${invalidRestaurants.length} restaurants are missing required fields (id)` },
+        { status: 400 }
+      )
+    };
+  }
+  return { valid: true };
+}
+
+/**
+ * Validate restaurant coordinates - used for manual-import
+ */
+function validateRestaurantCoordinates(restaurants: any[]): { valid: false; response: NextResponse } | { valid: true } {
+  const invalidCoords = restaurants.filter((r: any) => 
+    !r.coordinates || 
+    typeof r.coordinates.latitude !== 'number' || 
+    typeof r.coordinates.longitude !== 'number' ||
+    isNaN(r.coordinates.latitude) || 
+    isNaN(r.coordinates.longitude)
+  );
+  if (invalidCoords.length > 0) {
+    return {
+      valid: false,
+      response: NextResponse.json(
+        { success: false, message: `${invalidCoords.length} restaurants have invalid coordinates (latitude and longitude must be numbers)` },
+        { status: 400 }
+      )
+    };
+  }
+  return { valid: true };
+}
+
+// ============================================================================
+// SHARED HEXTILE HELPERS (DRY)
+// ============================================================================
+
+/**
+ * Update hex tile staged count from actual database count
  */
 async function updateHextileStagedCount(h3Id: string): Promise<void> {
   try {
     const { upsertHextile, getHextile, getHextileCenter } = await import('@/lib/database/hextiles');
     const h3 = await import('h3-js');
     
-    // Calculate actual staged count from database
     const { count, error: countError } = await supabaseServer
       .from('yelp_staging')
       .select('*', { count: 'exact', head: true })
@@ -33,21 +114,88 @@ async function updateHextileStagedCount(h3Id: string): Promise<void> {
       
       await upsertHextile({
         h3_id: h3Id.trim(),
-        city_id: existing?.city_id || '', // Preserve city_id
+        city_id: existing?.city_id || '',
         status: existing?.status || 'fetched',
         center_lat: center.lat,
         center_lng: center.lng,
-        staged: actualStagedCount,  // Use actual count from database
+        staged: actualStagedCount,
         resolution: resolution
       });
       
       console.log(`✅ Updated hexagon ${h3Id.trim()}: staged count = ${actualStagedCount} (calculated from database)`);
     }
   } catch (hexError) {
-    // Non-fatal: log warning but don't throw
     console.warn(`⚠️ Failed to update hexagon staged count ${h3Id} (non-fatal):`, hexError);
   }
 }
+
+/**
+ * Ensure a hextile exists in the database (upsert if needed)
+ * Returns true on success, false on failure
+ */
+async function ensureHextileExists(
+  h3Id: string, 
+  cityId: string, 
+  restaurantCount?: number
+): Promise<{ success: true } | { success: false; response: NextResponse }> {
+  try {
+    const { upsertHextile, getHextile, getHextileCenter } = await import('@/lib/database/hextiles');
+    const h3 = await import('h3-js');
+    
+    const existing = await getHextile(h3Id.trim());
+    const center = getHextileCenter(h3Id.trim());
+    
+    if (!center) {
+      return {
+        success: false,
+        response: NextResponse.json(
+          { success: false, message: `Failed to get center coordinates for hexagon ${h3Id.trim()}` },
+          { status: 500 }
+        )
+      };
+    }
+    
+    const resolution = h3.getResolution(h3Id.trim());
+    
+    const hextileResult = await upsertHextile({
+      h3_id: h3Id.trim(),
+      city_id: cityId.trim(),
+      status: 'fetched' as YelpHextileStatus,
+      center_lat: center.lat,
+      center_lng: center.lng,
+      yelp_total_businesses: existing?.yelp_total_businesses ?? restaurantCount,
+      staged: existing?.staged ?? 0,
+      resolution: resolution
+    });
+    
+    if (!hextileResult) {
+      console.error(`❌ Failed to create/update hexagon ${h3Id.trim()}`);
+      return {
+        success: false,
+        response: NextResponse.json(
+          { success: false, message: 'Failed to create hexagon tile in database' },
+          { status: 500 }
+        )
+      };
+    }
+    
+    console.log(`✅ Ensured hexagon ${h3Id.trim()} exists`);
+    return { success: true };
+  } catch (hexError) {
+    console.error(`❌ Failed to ensure hexagon ${h3Id} exists:`, hexError);
+    return {
+      success: false,
+      response: NextResponse.json(
+        { success: false, message: 'Failed to create hexagon tile - cannot save restaurants without it' },
+        { status: 500 }
+      )
+    };
+  }
+}
+
+// ============================================================================
+// MAIN POST HANDLER
+// ============================================================================
 
 /**
  * Main POST handler that routes to specific staging operations based on action
@@ -61,7 +209,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          message: 'Invalid action: must be a non-empty string. Valid actions: bulk-create, bulk-update-status, check-existing, update-status'
+          message: 'Invalid action: must be a non-empty string. Valid actions: bulk-create, bulk-update-status, check-existing, update-status, manual-import'
         },
         { status: 400 }
       );
@@ -76,11 +224,13 @@ export async function POST(request: NextRequest) {
         return handleCheckExisting(body);
       case 'update-status':
         return handleUpdateStatus(body);
+      case 'manual-import':
+        return handleManualImport(body);
       default:
         return NextResponse.json(
           {
             success: false,
-            message: `Unknown action: "${action}". Valid actions: bulk-create, bulk-update-status, check-existing, update-status`
+            message: `Unknown action: "${action}". Valid actions: bulk-create, bulk-update-status, check-existing, update-status, manual-import`
           },
           { status: 400 }
         );
@@ -92,14 +242,15 @@ export async function POST(request: NextRequest) {
     });
 
     return NextResponse.json(
-      {
-        success: false,
-        message: 'Internal server error in staging API'
-      },
+      { success: false, message: 'Internal server error in staging API' },
       { status: 500 }
     );
   }
 }
+
+// ============================================================================
+// ACTION HANDLERS
+// ============================================================================
 
 /**
  * Handler for bulk creating staging restaurants (for approved restaurants)
@@ -108,149 +259,54 @@ async function handleBulkCreate(body: any): Promise<NextResponse> {
   try {
     const { restaurants, h3Id, cityId, importLogId } = body;
 
-    // Input validation
-    if (!restaurants || !Array.isArray(restaurants) || restaurants.length === 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: 'Invalid restaurants: must be a non-empty array'
-        },
-        { status: 400 }
-      );
-    }
+    // Use shared validation helpers
+    const restaurantsValidation = validateRestaurantsArray(restaurants);
+    if (!restaurantsValidation.valid) return restaurantsValidation.response;
 
     if (!h3Id || typeof h3Id !== 'string' || h3Id.trim().length === 0) {
       return NextResponse.json(
-        {
-          success: false,
-          message: 'Invalid h3Id: must be a non-empty string'
-        },
+        { success: false, message: 'Invalid h3Id: must be a non-empty string' },
         { status: 400 }
       );
     }
 
-    if (!cityId || typeof cityId !== 'string' || cityId.trim().length === 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: 'Invalid cityId: must be a non-empty string'
-        },
-        { status: 400 }
-      );
-    }
+    const cityIdValidation = validateCityId(cityId);
+    if (!cityIdValidation.valid) return cityIdValidation.response;
 
     if (!importLogId || typeof importLogId !== 'string' || importLogId.trim().length === 0) {
       return NextResponse.json(
-        {
-          success: false,
-          message: 'Invalid importLogId: must be a non-empty string'
-        },
+        { success: false, message: 'Invalid importLogId: must be a non-empty string' },
         { status: 400 }
       );
     }
 
-    // Validate all restaurants have required fields
-    const invalidRestaurants = restaurants.filter(
-      (r: any) => !r || !r.id || typeof r.id !== 'string' || r.id.trim().length === 0
-    );
-    if (invalidRestaurants.length > 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: `Invalid restaurants found: ${invalidRestaurants.length} restaurants are missing required fields (id)`
-        },
-        { status: 400 }
-      );
-    }
+    const restaurantIdsValidation = validateRestaurantIds(restaurants);
+    if (!restaurantIdsValidation.valid) return restaurantIdsValidation.response;
 
-    // Convert restaurants to YelpBusiness format (they should already be in this format)
-    const yelpBusinesses: YelpBusiness[] = restaurants as YelpBusiness[];
+    // Ensure hextile exists (FK constraint) using shared helper
+    const hextileResult = await ensureHextileExists(h3Id, cityId, restaurants.length);
+    if (!hextileResult.success) return hextileResult.response;
 
-    // 🔧 FIX: Create/update hexagon BEFORE saving restaurants
-    // This ensures the foreign key constraint is satisfied
-    try {
-      const { upsertHextile, getHextile, getHextileCenter } = await import('@/lib/database/hextiles');
-      const h3 = await import('h3-js');
-      
-      // Get existing hexagon to check if it already has yelp_total_businesses
-      const existing = await getHextile(h3Id.trim());
-      
-      const center = getHextileCenter(h3Id.trim());
-      if (center) {
-        const resolution = h3.getResolution(h3Id.trim());
-        
-        const hextileResult = await upsertHextile({
-          h3_id: h3Id.trim(),
-          city_id: cityId.trim(),
-          status: 'fetched',
-          center_lat: center.lat,
-          center_lng: center.lng,
-          // Only set yelp_total_businesses if hexagon is new (preserve existing if updating)
-          yelp_total_businesses: existing?.yelp_total_businesses ?? restaurants.length,
-          staged: existing?.staged ?? 0,  // Preserve existing staged count
-          resolution: resolution
-        });
-        
-        if (!hextileResult) {
-          console.error(`❌ Failed to create/update hexagon ${h3Id.trim()}`);
-          return NextResponse.json(
-            {
-              success: false,
-              message: 'Failed to create hexagon tile in database'
-            },
-            { status: 500 }
-          );
-        }
-        
-        console.log(`✅ Created/updated hexagon ${h3Id.trim()} before saving restaurants`);
-      } else {
-        return NextResponse.json(
-          {
-            success: false,
-            message: `Failed to get center coordinates for hexagon ${h3Id.trim()}`
-          },
-          { status: 500 }
-        );
-      }
-    } catch (hexError) {
-      console.error(`❌ Failed to create hexagon ${h3Id} (fatal):`, hexError);
-      return NextResponse.json(
-        {
-          success: false,
-          message: 'Failed to create hexagon tile - cannot save restaurants without it'
-        },
-        { status: 500 }
-      );
-    }
-
-    // NOW create staging records (hexagon already exists, so foreign key is satisfied)
+    // Create staging records using shared database function
     const result = await batchCreateYelpStaging(
-      yelpBusinesses,
+      restaurants as YelpBusiness[],
       h3Id.trim(),
       cityId.trim(),
       importLogId.trim()
     );
 
-    // Update hexagon with staged count after save
-    // DO NOT update yelp_total_businesses - it's immutable after first set
-    // Calculate actual count from database instead of incrementing for accuracy
+    // Update hexagon staged count from actual database
     if (result.createdCount > 0) {
       await updateHextileStagedCount(h3Id.trim());
     }
 
-    // Update import log with staging statistics (increment instead of overwrite)
-    // FIX: Update duplicates count even when all restaurants are duplicates (createdCount === 0)
+    // Update import log with staging statistics
     try {
-      const { 
-        incrementStagedCount, 
-        incrementDuplicatesCount
-      } = await import('@/lib/database/importLogs');
+      const { incrementStagedCount, incrementDuplicatesCount } = await import('@/lib/database/importLogs');
       
-      // Increment each count separately
       if (result.createdCount > 0) {
         await incrementStagedCount(importLogId.trim(), result.createdCount);
       }
-      // FIX: Always update duplicates count, even if createdCount is 0
       if (result.skippedCount > 0) {
         await incrementDuplicatesCount(importLogId.trim(), result.skippedCount);
       }
@@ -290,10 +346,7 @@ async function handleBulkCreate(body: any): Promise<NextResponse> {
     });
 
     return NextResponse.json(
-      {
-        success: false,
-        message: 'Internal server error while creating staging restaurants'
-      },
+      { success: false, message: 'Internal server error while creating staging restaurants' },
       { status: 500 }
     );
   }
@@ -559,6 +612,68 @@ async function handleUpdateStatus(body: any): Promise<NextResponse> {
         success: false,
         message: 'Internal server error while updating restaurant status'
       },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * Handler for manual restaurant import from CSV
+ * DOES NOT save to DB - only validates, calculates H3 IDs, and returns data
+ * Restaurants stay in frontend state until first approve/reject
+ */
+async function handleManualImport(body: any): Promise<NextResponse> {
+  try {
+    const { restaurants, cityId } = body;
+    
+    console.log('[manual-import] Processing manual import', {
+      restaurantCount: restaurants?.length,
+      cityId
+    });
+    
+    // Validation
+    const restaurantsValidation = validateRestaurantsArray(restaurants);
+    if (!restaurantsValidation.valid) return restaurantsValidation.response;
+
+    const cityIdValidation = validateCityId(cityId);
+    if (!cityIdValidation.valid) return cityIdValidation.response;
+
+    const coordsValidation = validateRestaurantCoordinates(restaurants);
+    if (!coordsValidation.valid) return coordsValidation.response;
+    
+    // Calculate H3 IDs and assign to each restaurant
+    const h3 = await import('h3-js');
+    const restaurantsWithH3: any[] = [];
+    
+    for (const restaurant of restaurants) {
+      const h3Id = h3.latLngToCell(
+        restaurant.coordinates.latitude,
+        restaurant.coordinates.longitude,
+        7 // Resolution 7, same as Yelp importer
+      );
+      
+      restaurantsWithH3.push({
+        ...restaurant,
+        h3Id // Add H3 ID to restaurant object
+      });
+    }
+    
+    console.log(`✅ Calculated H3 IDs for ${restaurantsWithH3.length} restaurants`);
+    
+    // Return restaurants with H3 IDs - NO DB SAVE
+    return NextResponse.json({
+      success: true,
+      restaurants: restaurantsWithH3,
+      message: `Processed ${restaurantsWithH3.length} restaurant${restaurantsWithH3.length === 1 ? '' : 's'} from CSV`,
+      h3IdsCalculated: true
+    });
+    
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error('❌ Exception in handleManualImport:', { error: errorMessage });
+    
+    return NextResponse.json(
+      { success: false, message: 'Internal server error while processing restaurants' },
       { status: 500 }
     );
   }

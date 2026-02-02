@@ -5,56 +5,7 @@ import type { YelpBusiness } from '../yelp/search';
 import { validateYelpBusiness, logValidationError, type ValidationContext } from '../yelp/validation';
 
 /**
- * Check if a business already exists in staging
- * Returns the existing staging record if found, null otherwise
- * 
- * @param yelpId - The Yelp business ID to check
- * @param excludeStatuses - Optional array of statuses to exclude from duplicate check.
- *                          If provided, businesses with these statuses won't be considered duplicates.
- *                          Use case: exclude 'approved' when checking for duplicates during import.
- * @returns The existing staging record if found (and not excluded), null otherwise
- */
-export async function checkDuplicateBusiness(
-  yelpId: string,
-  excludeStatuses?: YelpStagingStatus[]
-): Promise<YelpStaging | null> {
-  try {
-    // Input validation
-    if (!yelpId || typeof yelpId !== 'string' || yelpId.trim().length === 0) {
-      console.warn('⚠️ checkDuplicateBusiness: Invalid yelpId provided');
-      return null;
-    }
-
-    let query = supabaseServer
-      .from('yelp_staging')
-      .select('*')
-      .eq('id', yelpId);
-
-    // If excludeStatuses is provided, exclude those statuses
-    if (excludeStatuses && excludeStatuses.length > 0) {
-      // Use .not() with .in() to exclude multiple statuses
-      for (const status of excludeStatuses) {
-        query = query.neq('status', status);
-      }
-    }
-
-    const { data, error } = await query.maybeSingle();
-
-    if (error) {
-      console.error('Error checking duplicate business in database:', error);
-      return null;
-    }
-
-    return data;
-  } catch (error) {
-    console.error('Exception checking duplicate business in database:', error);
-    return null;
-  }
-}
-
-/**
- * Check multiple businesses for duplicates in a single query
- * More efficient than calling checkDuplicateBusiness in a loop
+ * Check multiple businesses for duplicates in a single batch query
  * Returns map of yelpId -> existing record
  * 
  * @param yelpIds - Array of Yelp business IDs to check
@@ -87,6 +38,63 @@ export async function batchCheckDuplicates(
     return duplicateMap;
   } catch (error) {
     console.error('Exception batch checking duplicates:', error);
+    return new Map();
+  }
+}
+
+/**
+ * Check multiple businesses for duplicates by name and address
+ * Returns map of business ID -> existing record for duplicates found
+ * This is more robust than ID-only checking, especially for manual imports
+ * 
+ * @param businesses - Array of businesses to check
+ * @returns Map of business ID to existing staging record (for duplicates only)
+ */
+export async function batchCheckDuplicatesByNameAddress(
+  businesses: YelpBusiness[]
+): Promise<Map<string, YelpStaging>> {
+  try {
+    if (!businesses || businesses.length === 0) {
+      return new Map();
+    }
+
+    // Query all staging records (we'll filter in memory)
+    // Note: For large datasets, this should be optimized with DB-level filtering
+    const { data, error } = await supabaseServer
+      .from('yelp_staging')
+      .select('*');
+
+    if (error) {
+      console.error('Error batch checking duplicates by name+address:', error);
+      return new Map();
+    }
+
+    // Create lookup map: "name|address" -> existing record
+    const existingByKey = new Map<string, YelpStaging>();
+    
+    data?.forEach(record => {
+      if (record.data && typeof record.data === 'object') {
+        const business = record.data as YelpBusiness;
+        const key = `${business.name?.toLowerCase().trim() || ''}|${business.location?.address1?.toLowerCase().trim() || ''}`;
+        existingByKey.set(key, record);
+      }
+    });
+
+    // Check incoming businesses and build result map using business ID as key
+    const resultMap = new Map<string, YelpStaging>();
+    
+    businesses.forEach(business => {
+      const key = `${business.name?.toLowerCase().trim() || ''}|${business.location?.address1?.toLowerCase().trim() || ''}`;
+      const existing = existingByKey.get(key);
+      if (existing) {
+        resultMap.set(business.id, existing);
+      }
+    });
+
+    console.log(`📊 Duplicate check: ${resultMap.size} duplicates found out of ${businesses.length} checked`);
+    return resultMap;
+  } catch (error) {
+    console.error('Exception batch checking duplicates by name+address:', error);
     return new Map();
   }
 }
@@ -211,9 +219,8 @@ export async function batchCreateYelpStaging(
       
       console.log(`    Validation: ${validBusinesses.length} valid, ${batch.length - validBusinesses.length} invalid`);
       
-      // Step 2: Check for duplicates with single batch query
-      const businessIds = validBusinesses.map(b => b.id);
-      const duplicateMap = await batchCheckDuplicates(businessIds);
+      // Step 2: Check for duplicates with single batch query (using name+address matching)
+      const duplicateMap = await batchCheckDuplicatesByNameAddress(validBusinesses);
 
       // Build duplicate info array
       const duplicatesInBatch: DuplicateInfo[] = [];

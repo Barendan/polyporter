@@ -128,6 +128,57 @@ export default function CityMap({ cityData, onRestaurantDataChange }: CityMapPro
     onRestaurantDataChange?.(results);
   };
 
+  // Reusable function to reload cached restaurant data
+  // This can be called manually (e.g., after manual import) to refresh the cache
+  const reloadCache = useCallback(async () => {
+    const cityId = (cityData as any)?.city_id;
+    if (!cityId) {
+      console.warn('⚠️ Cannot reload cache: no city ID');
+      return;
+    }
+
+    setIsLoadingCache(true);
+    // Reset the ref to allow reload even if cache was already loaded
+    hasLoadedCacheRef.current = null;
+
+    try {
+      console.log('📦 Reloading cached restaurants for city:', cityId);
+
+      const response = await fetch('/api/yelp/search', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'load_cached',
+          city_id: cityId
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to load cache: ${response.status}`);
+      }
+
+      const result = await response.json();
+      
+      // Set the results - this will trigger restaurant display on map
+      setYelpResults(result);
+      // Notify parent component of restaurant data changes
+      onRestaurantDataChange?.(result);
+
+      hasLoadedCacheRef.current = cityId; // Mark as loaded
+      console.log(`✅ Reloaded ${result.processingStats?.totalRequested || 0} cached restaurants`);
+
+    } catch (error) {
+      console.error('❌ Failed to reload cached restaurants:', error);
+      // Reset the ref so user can retry if they want
+      hasLoadedCacheRef.current = null;
+      // Fail silently - don't break the UI
+    } finally {
+      setIsLoadingCache(false);
+    }
+  }, [cityData, onRestaurantDataChange]);
+
   // Automatically load cached restaurant data when city changes
   useEffect(() => {
     // Check if city has cached restaurant data available
@@ -146,50 +197,9 @@ export default function CityMap({ cityData, onRestaurantDataChange }: CityMapPro
       return;
     }
     
-    // Automatically load cached data
-    const loadCachedData = async () => {
-      setIsLoadingCache(true);
-      hasLoadedCacheRef.current = cityId; // Mark this city as loaded
-      
-      try {
-        console.log('📦 Auto-loading cached restaurants for city:', cityId);
-        
-        const response = await fetch('/api/yelp/search', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            action: 'load_cached',
-            city_id: cityId
-          }),
-        });
-
-        if (!response.ok) {
-          throw new Error(`Failed to load cache: ${response.status}`);
-        }
-
-        const result = await response.json();
-        
-        // Set the results - this will trigger restaurant display on map
-        setYelpResults(result);
-        // Notify parent component of restaurant data changes
-        onRestaurantDataChange?.(result);
-        
-        console.log(`✅ Auto-loaded ${result.processingStats?.totalRequested || 0} cached restaurants`);
-        
-      } catch (error) {
-        console.error('❌ Failed to auto-load cached restaurants:', error);
-        // Reset the ref so user can retry if they want
-        hasLoadedCacheRef.current = null;
-        // Fail silently - don't break the UI
-      } finally {
-        setIsLoadingCache(false);
-      }
-    };
-    
-    loadCachedData();
-  }, [cityData]);
+    // Use the reusable reloadCache function
+    reloadCache();
+  }, [cityData, reloadCache, onRestaurantDataChange]);
 
   // Recenter map on city boundary
   const recenterMap = () => {
@@ -321,7 +331,12 @@ export default function CityMap({ cityData, onRestaurantDataChange }: CityMapPro
       />
 
       {/* Restaurant Review Panel */}
-      <RestaurantReviewPanel yelpResults={yelpResults} cityName={cityData?.name} />
+      <RestaurantReviewPanel 
+        yelpResults={yelpResults} 
+        cityName={cityData?.name}
+        onCacheReload={reloadCache}
+        setYelpResults={setYelpResults}
+      />
 
     </div>
   );
