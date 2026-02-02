@@ -1,6 +1,6 @@
 // Database helper functions for Yelp import logs (yelp_import_logs table)
-import { supabaseServer } from '../config/supabaseServer';
-import type { YelpImportLog, YelpImportStatus } from '../types';
+import { supabaseServer } from '@/shared/config/supabaseServer';
+import type { YelpImportLog, YelpImportStatus } from '@/shared/types';
 
 export interface CreateImportLogInput {
   city_id?: string;

@@ -1,6 +1,6 @@
 // Enhanced Hexagon Processor - handles coverage strategies and dense hexagon processing
-import { generateSearchPoints, validateCoverage, getCoverageStats, type HexagonCoverage } from './coverage';
-import { detectDenseHexagon, splitHexagon, mergeSubHexagonResults, type SplitHexagon, type HexagonSplitResult } from './splitter';
+import { generateSearchPoints, validateCoverage, getCoverageStats } from './coverage';
+import { detectDenseHexagon, splitHexagon, type HexagonSplitResult } from './splitter';
 import { yelpQuotaManager } from '../utils/quotaManager';
 
 export interface HexagonProcessingStatus {

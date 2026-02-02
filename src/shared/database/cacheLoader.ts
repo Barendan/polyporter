@@ -1,8 +1,8 @@
 // Database helper functions for loading cached restaurant data
 import { supabaseServer } from '../config/supabaseServer';
-import { getHextilesByCity } from './hextiles';
-import { getStagingBusinessesAsYelpBusinesses } from './yelpStaging';
-import type { YelpBusiness } from '../yelp/search';
+import { getHextilesByCity } from '@/features/yelp/data/hextiles';
+import { getStagingBusinessesAsYelpBusinesses } from '@/features/yelp/data/yelpStaging';
+import type { YelpBusiness } from '@/features/yelp/domain/search';
 
 // Interface matching the HexagonResult structure used in the frontend
 export interface CachedHexagonResult {

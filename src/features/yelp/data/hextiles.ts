@@ -1,6 +1,6 @@
 // Database helper functions for hexagon tiles (yelp_hextiles table)
-import { supabaseServer } from '../config/supabaseServer';
-import type { YelpHextile, YelpHextileStatus } from '../types';
+import { supabaseServer } from '@/shared/config/supabaseServer';
+import type { YelpHextile, YelpHextileStatus } from '@/shared/types';
 import * as h3 from 'h3-js';
 
 export interface CreateHextileInput {

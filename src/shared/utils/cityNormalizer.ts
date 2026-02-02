@@ -1,6 +1,6 @@
 // Unified city and state normalization utilities
 import type { EnhancedCityResponse } from '../geography/cityTypes';
-import type { City, YelpPolygonZone } from '../types';
+import type { City, YelpPolygonZone } from '../../lib/types';
 import { createEnhancedCityResponse } from '../geography/cityUtils';
 import type { Feature, Polygon, MultiPolygon } from 'geojson';
 

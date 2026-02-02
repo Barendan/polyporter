@@ -1,10 +1,10 @@
 // Yelp Search API Route - Consolidated handler for Yelp search operations
 import { NextRequest, NextResponse } from 'next/server';
 import { processHexagons } from './processHexagons';
-import { hexagonProcessor } from '@/lib/hexagons/processor';
-import { yelpQuotaManager } from '@/lib/utils/quotaManager';
-import { yelpRateLimiter } from '@/lib/yelp/rateLimiter';
-import { getCachedRestaurantData, checkCacheStatus } from '@/lib/database/cacheLoader';
+import { hexagonProcessor } from '@/shared/hexagons/processor';
+import { yelpQuotaManager } from '@/shared/utils/quotaManager';
+import { yelpRateLimiter } from '@/features/yelp/domain/rateLimiter';
+import { getCachedRestaurantData, checkCacheStatus } from '@/shared/database/cacheLoader';
 import { processingStates, type ProcessingState } from './state';
 
 /**

@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
-import { parseRestaurantCSV, generateCsvContent, downloadCsv } from '@/lib/utils/csvParser';
-import { metersToMiles, detectFranchise, getStatusColor, getStatusIcon } from '@/lib/utils/restaurantUtils';
+import { parseRestaurantCSV, generateCsvContent, downloadCsv } from '@/features/yelp/utils/csvParser';
+import { metersToMiles, detectFranchise, getStatusColor, getStatusIcon } from '@/features/yelp/utils/restaurantUtils';
 
 // Define interfaces for Yelp testing state
 interface Restaurant {
@@ -57,6 +57,26 @@ interface YelpTestResult {
     duplicatesSkipped?: number;
     newRestaurantsCount?: number;
   };
+}
+
+interface ImportLogCity {
+  name?: string;
+  state?: string;
+}
+
+interface ImportLog {
+  id: string;
+  status?: 'complete' | 'running' | 'failed' | string;
+  created_at?: string;
+  processed_tiles?: number;
+  total_tiles?: number;
+  tiles_cached?: number;
+  cities?: ImportLogCity | ImportLogCity[] | null;
+  city_id?: string | null;
+  restaurants_fetched?: number;
+  restaurants_unique?: number;
+  restaurants_staged?: number;
+  duplicates_existing?: number;
 }
 
 interface RestaurantReviewPanelProps {
@@ -122,7 +142,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
   const [filterOutCached, setFilterOutCached] = useState(false);
 
   // Add to existing state declarations (around line 64-110):
-  const [importLogs, setImportLogs] = useState<any[]>([]);
+  const [importLogs, setImportLogs] = useState<ImportLog[]>([]);
   const [showImportHistory, setShowImportHistory] = useState(false);
   const [deletingImportLogIds, setDeletingImportLogIds] = useState<Set<string>>(new Set());
 
@@ -137,8 +157,8 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
   // FIX: Move early return check AFTER all hooks are called
   // All hooks must be called in the same order on every render
 
-  // Helper functions - must be defined before useMemo hooks
-  const getAllRestaurants = () => {
+  // Derived data - memoized to keep hook deps stable
+  const allRestaurants = useMemo((): Restaurant[] => {
     // Use newBusinesses if available (only restaurants added to staging, already deduplicated)
     if (yelpResults?.newBusinesses) {
       return yelpResults.newBusinesses;
@@ -158,7 +178,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     
     // Don't filter out reviewed restaurants - keep them visible
     return Array.from(uniqueMap.values());
-  };
+  }, [yelpResults?.newBusinesses, yelpResults?.results]);
 
   // Create mapping from restaurant ID to hexagon ID
   // This is needed because restaurants can come from multiple hexagons
@@ -206,7 +226,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     if (!yelpResults?.results) return { total: 0, unique: 0 };
     const allBusinesses = yelpResults.results.flatMap(result => result.uniqueBusinesses || []);
     const total = allBusinesses.length; // Total including duplicates across hexagons
-    const unique = getAllRestaurants().length; // After deduplication
+    const unique = allRestaurants.length; // After deduplication
     return { total, unique };
   };
   
@@ -214,7 +234,6 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
   // Returns counts for each filter type and overlap
   // NOTE: This function must be defined AFTER detectFranchise since it calls it
   const getFilterStats = () => {
-    const allRestaurants = getAllRestaurants();
     const totalCount = allRestaurants.length;
     
     // Count what would be filtered by each filter
@@ -362,7 +381,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         const restaurantsWithH3 = data.restaurants;
         
         // Check for duplicates against current state
-        const currentRestaurants = getAllRestaurants();
+        const currentRestaurants = allRestaurants;
         const { duplicates, uniqueNew } = findDuplicates(currentRestaurants, restaurantsWithH3);
         
         if (duplicates.length > 0) {
@@ -439,7 +458,6 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       return false;
     }
     
-    const allRestaurants = getAllRestaurants();
     if (allRestaurants.length === 0) {
       console.log('No restaurants to save');
       return true;
@@ -501,7 +519,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       console.error(`❌ Failed to save restaurants to DB (${totalErrors} errors)`);
       return false;
     }
-  }, [isPersistedToDb, yelpResults, getAllRestaurants, restaurantToHexagonMap]);
+  }, [isPersistedToDb, yelpResults, allRestaurants, restaurantToHexagonMap]);
 
   // Helper to trigger file upload when input changes
   const handleFileInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -555,7 +573,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       }
       
       // Get restaurant object
-      const restaurant = getAllRestaurants().find(r => r.id === restaurantId);
+    const restaurant = allRestaurants.find(r => r.id === restaurantId);
       if (!restaurant) {
         throw new Error('Restaurant not found');
       }
@@ -623,7 +641,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       return;
     }
 
-    const selectedRestaurants = getAllRestaurants().filter(r => selectedIds.includes(r.id));
+    const selectedRestaurants = allRestaurants.filter(r => selectedIds.includes(r.id));
     
     // Build CSV data using imported utilities
     const headers = ['Name', 'Rating', 'Price', 'Category', 'Address', 'City', 'State', 'Zip Code', 'Phone', 'Distance (miles)', 'Yelp URL'];
@@ -866,7 +884,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
 
   // Filtered and sorted restaurants for restaurants tab - simplified
   const processedRestaurants = useMemo(() => {
-    let restaurants = getAllRestaurants();
+    let restaurants = allRestaurants;
     
     // Apply franchise filter FIRST (before search)
     if (filterOutFranchises) {
@@ -929,7 +947,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     });
     
     return sorted;
-  }, [restaurantSearch, restaurantSortOrder, restaurantSortType, yelpResults, reviewedRestaurantIds, filterOutFranchises, filterOutZeroRating, filterOutNoFullAddress, filterOutCached, restaurantToHexagonMap]);
+  }, [restaurantSearch, restaurantSortOrder, restaurantSortType, yelpResults, filterOutFranchises, filterOutZeroRating, filterOutNoFullAddress, filterOutCached, restaurantToHexagonMap, allRestaurants]);
 
   // Paginated restaurants
   const paginatedRestaurants = useMemo(() => {
@@ -1136,7 +1154,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
           const savedIds = JSON.parse(saved) as string[];
           // Only restore if we have matching restaurants
           const validIds = savedIds.filter(id => 
-            getAllRestaurants().some(r => r.id === id)
+            allRestaurants.some(r => r.id === id)
           );
           if (validIds.length > 0) {
             setSelectedRestaurantIds(new Set(validIds));
@@ -1146,7 +1164,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         console.warn('Failed to load selections from localStorage:', error);
       }
     }
-  }, [yelpResults?.results]); // Only run when yelpResults changes
+  }, [allRestaurants, yelpResults?.results]); // Only run when yelpResults changes
 
   // Save selections to localStorage whenever they change
   useEffect(() => {
@@ -1242,7 +1260,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     if (!yelpResults?.results) return { total: 0, unique: 0, duplicates: 0 };
     
     const allBusinesses = yelpResults.results.flatMap(result => result.uniqueBusinesses || []);
-    const uniqueBusinesses = getAllRestaurants();
+    const uniqueBusinesses = allRestaurants;
     
     return {
       total: allBusinesses.length,
@@ -1510,16 +1528,16 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                   </button>
                   {showImportHistory && (
                     <div className="px-4 pb-4 space-y-2 max-h-80 overflow-y-auto">
-                      {importLogs.map((log: any) => (
+                      {importLogs.map((log) => (
                         <div key={log.id} className="text-sm p-3 bg-white rounded-lg border space-y-2">
                           <div className="flex justify-between items-center">
                             <span className={`font-medium ${log.status === 'complete' ? 'text-green-600' : log.status === 'running' ? 'text-orange-500' : 'text-red-600'}`}>
-                              {log.status === 'complete' ? '✅' : log.status === 'running' ? '⏳' : '❌'} {new Date(log.created_at).toLocaleDateString()}
+                              {log.status === 'complete' ? '✅' : log.status === 'running' ? '⏳' : '❌'} {log.created_at ? new Date(log.created_at).toLocaleDateString() : 'Unknown date'}
                             </span>
                             <div className="flex items-center gap-2">
                               <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded">
-                                {log.processed_tiles}/{log.total_tiles} tiles
-                                {(log.tiles_cached > 0) && ` (${log.tiles_cached} cached)`}
+                                {log.processed_tiles ?? 0}/{log.total_tiles ?? 0} tiles
+                                {((log.tiles_cached ?? 0) > 0) && ` (${log.tiles_cached} cached)`}
                               </span>
                               <button
                                 onClick={() => handleDeleteImportLog(log.id)}
@@ -1547,7 +1565,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                             <span>💾 Staged: {log.restaurants_staged || 0}</span>
                             <span>🧩 Total tiles: {log.total_tiles || 0}</span>
                           </div>
-                          {log.duplicates_existing > 0 && (
+                          {((log.duplicates_existing ?? 0) > 0) && (
                             <div className="text-xs text-slate-400">
                               🔄 {log.duplicates_existing || 0} existing dupes
                             </div>
@@ -1772,7 +1790,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                     <div className="bg-white/20 backdrop-blur-lg rounded-xl px-5 py-2 border border-white/40 shadow-lg">
                       <div className="text-2xl font-black text-white tracking-tight">{processedRestaurants.length}</div>
                       <div className="text-[10px] text-white/95 font-semibold uppercase tracking-wide">
-                        {processedRestaurants.length === getAllRestaurants().length ? 'Total' : 'Found'}
+                        {processedRestaurants.length === allRestaurants.length ? 'Total' : 'Found'}
                       </div>
                     </div>
                   </div>
@@ -2308,9 +2326,9 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                     >
                       Clear Search
                     </button>
-                  )}  // Clear Search button conditional
-                </div>  // No restaurants found div
-              )}  // conditional wrapper
+                  )}
+                </div>
+              )}
 
             {/* Hidden file input for CSV import */}
             <input
@@ -2321,10 +2339,10 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
               className="hidden"
               aria-label="Upload CSV file"
             />
-          </div>  // Close restaurants content div (line 1616)
-        )}  // Close restaurants tab (line 1615)
-      </div>  // Close tab content div (line 1259)
-    </div>  // Close white box div (line 1194)
-  </div>  // Close main container div (line 1192)
+          </div>
+        )}
+      </div>
+    </div>
+  </div>
   );
 }

@@ -1,8 +1,8 @@
 // Database helper functions for Yelp business staging (yelp_staging table)
-import { supabaseServer } from '../config/supabaseServer';
-import type { YelpStaging, YelpStagingStatus } from '../types';
-import type { YelpBusiness } from '../yelp/search';
-import { validateYelpBusiness, logValidationError, type ValidationContext } from '../yelp/validation';
+import { supabaseServer } from '@/shared/config/supabaseServer';
+import type { YelpStaging, YelpStagingStatus } from '@/shared/types';
+import type { YelpBusiness } from '@/features/yelp/domain/search';
+import { validateYelpBusiness, logValidationError, type ValidationContext } from '@/features/yelp/domain/validation';
 
 /**
  * Check multiple businesses for duplicates in a single batch query

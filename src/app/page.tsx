@@ -3,12 +3,12 @@
 import { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import dynamic from 'next/dynamic';
-import type { EnhancedCityResponse } from '@/lib/geography/cityTypes';
-import type { YelpTestResult } from '../components/CityMap/index';
-import LoadingModal from '../components/LoadingModal';
+import type { EnhancedCityResponse } from '@/shared/geography/cityTypes';
+import type { YelpTestResult } from '@/features/city-map';
+import LoadingModal from '../shared/components/LoadingModal';
 
 // Dynamically import the map component to avoid SSR issues
-const CityMap = dynamic(() => import('../components/CityMap/index'), { ssr: false });
+const CityMap = dynamic(() => import('@/features/city-map'), { ssr: false });
 
 interface FormData {
   cityName: string;

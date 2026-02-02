@@ -1,6 +1,6 @@
 'use client';
 
-import type { EnhancedCityResponse } from '@/lib/geography/cityTypes';
+import type { EnhancedCityResponse } from '@/shared/geography/cityTypes';
 
 interface MapControlsProps {
   cityData: EnhancedCityResponse | null;

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabaseServer } from '@/lib/config/supabaseServer';
-import { getImportLogsByCity, getAllImportLogs } from '@/lib/database/importLogs';
+import { supabaseServer } from '@/shared/config/supabaseServer';
+import { getImportLogsByCity, getAllImportLogs } from '@/features/yelp/data/importLogs';
 
 export async function GET(request: NextRequest) {
   const cityId = request.nextUrl.searchParams.get('cityId');

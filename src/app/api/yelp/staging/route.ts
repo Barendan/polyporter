@@ -1,9 +1,9 @@
 // Consolidated API endpoint for all Yelp staging operations
 import { NextRequest, NextResponse } from 'next/server';
-import { batchCreateYelpStaging, bulkUpdateStagingStatus, updateStagingStatus } from '@/lib/database/yelpStaging';
-import { supabaseServer } from '@/lib/config/supabaseServer';
-import type { YelpBusiness } from '@/lib/yelp/search';
-import type { YelpStagingStatus, YelpHextileStatus } from '@/lib/types';
+import { batchCreateYelpStaging, bulkUpdateStagingStatus, updateStagingStatus } from '@/features/yelp/data/yelpStaging';
+import { supabaseServer } from '@/shared/config/supabaseServer';
+import type { YelpBusiness } from '@/features/yelp/domain/search';
+import type { YelpStagingStatus, YelpHextileStatus } from '@/shared/types';
 
 // ============================================================================
 // SHARED VALIDATION HELPERS (DRY)
@@ -92,7 +92,7 @@ function validateRestaurantCoordinates(restaurants: any[]): { valid: false; resp
  */
 async function updateHextileStagedCount(h3Id: string): Promise<void> {
   try {
-    const { upsertHextile, getHextile, getHextileCenter } = await import('@/lib/database/hextiles');
+    const { upsertHextile, getHextile, getHextileCenter } = await import('@/features/yelp/data/hextiles');
     const h3 = await import('h3-js');
     
     const { count, error: countError } = await supabaseServer
@@ -139,7 +139,7 @@ async function ensureHextileExists(
   restaurantCount?: number
 ): Promise<{ success: true } | { success: false; response: NextResponse }> {
   try {
-    const { upsertHextile, getHextile, getHextileCenter } = await import('@/lib/database/hextiles');
+    const { upsertHextile, getHextile, getHextileCenter } = await import('@/features/yelp/data/hextiles');
     const h3 = await import('h3-js');
     
     const existing = await getHextile(h3Id.trim());
@@ -302,7 +302,7 @@ async function handleBulkCreate(body: any): Promise<NextResponse> {
 
     // Update import log with staging statistics
     try {
-      const { incrementStagedCount, incrementDuplicatesCount } = await import('@/lib/database/importLogs');
+      const { incrementStagedCount, incrementDuplicatesCount } = await import('@/features/yelp/data/importLogs');
       
       if (result.createdCount > 0) {
         await incrementStagedCount(importLogId.trim(), result.createdCount);
