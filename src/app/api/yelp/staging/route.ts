@@ -209,7 +209,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          message: 'Invalid action: must be a non-empty string. Valid actions: bulk-create, bulk-update-status, check-existing, update-status, manual-import'
+          message: 'Invalid action: must be a non-empty string. Valid actions: bulk-create, bulk-update-status, check-existing, get-statuses, get-status-counts, update-status, manual-import'
         },
         { status: 400 }
       );
@@ -222,6 +222,10 @@ export async function POST(request: NextRequest) {
         return handleBulkUpdateStatus(body);
       case 'check-existing':
         return handleCheckExisting(body);
+      case 'get-statuses':
+        return handleGetStatuses(body);
+      case 'get-status-counts':
+        return handleGetStatusCounts(body);
       case 'update-status':
         return handleUpdateStatus(body);
       case 'manual-import':
@@ -230,7 +234,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json(
           {
             success: false,
-            message: `Unknown action: "${action}". Valid actions: bulk-create, bulk-update-status, check-existing, update-status, manual-import`
+          message: `Unknown action: "${action}". Valid actions: bulk-create, bulk-update-status, check-existing, get-statuses, get-status-counts, update-status, manual-import`
           },
           { status: 400 }
         );
@@ -326,19 +330,31 @@ async function handleBulkCreate(body: any): Promise<NextResponse> {
         newBusinesses: result.newBusinesses,
         duplicates: result.duplicates
       });
-    } else {
-      return NextResponse.json(
-        {
-          success: false,
-          message: `Failed to create any restaurants. ${result.skippedCount} duplicates, ${result.errorCount} validation errors`,
-          createdCount: result.createdCount,
-          skippedCount: result.skippedCount,
-          errorCount: result.errorCount,
-          duplicates: result.duplicates
-        },
-        { status: 400 }
-      );
     }
+
+    if (result.skippedCount > 0 && result.errorCount === 0) {
+      return NextResponse.json({
+        success: true,
+        message: `No new restaurants created. ${result.skippedCount} duplicate${result.skippedCount === 1 ? '' : 's'} skipped`,
+        createdCount: result.createdCount,
+        skippedCount: result.skippedCount,
+        errorCount: result.errorCount,
+        newBusinesses: result.newBusinesses,
+        duplicates: result.duplicates
+      });
+    }
+
+    return NextResponse.json(
+      {
+        success: false,
+        message: `Failed to create any restaurants. ${result.skippedCount} duplicates, ${result.errorCount} validation errors`,
+        createdCount: result.createdCount,
+        skippedCount: result.skippedCount,
+        errorCount: result.errorCount,
+        duplicates: result.duplicates
+      },
+      { status: 400 }
+    );
   } catch (error) {
     console.error('❌ Exception in handleBulkCreate:', {
       error: error instanceof Error ? error.message : String(error),
@@ -536,6 +552,161 @@ async function handleCheckExisting(body: any): Promise<NextResponse> {
         success: false,
         message: 'Internal server error while checking existing restaurants',
         existingIds: []
+      },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * Handler to get current statuses for a set of restaurants
+ */
+async function handleGetStatuses(body: any): Promise<NextResponse> {
+  try {
+    const { yelpIds } = body;
+
+    if (!yelpIds || !Array.isArray(yelpIds) || yelpIds.length === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: 'Invalid yelpIds: must be a non-empty array',
+          statuses: []
+        },
+        { status: 400 }
+      );
+    }
+
+    const validIds = Array.from(
+      new Set(
+        yelpIds.filter((id: any) => typeof id === 'string' && id.trim().length > 0).map((id: string) => id.trim())
+      )
+    );
+
+    if (validIds.length === 0) {
+      return NextResponse.json({
+        success: true,
+        statuses: [],
+        message: 'No valid IDs to check'
+      });
+    }
+
+    const batchSize = 200;
+    const statuses: Array<{ id: string; status: YelpStagingStatus }> = [];
+
+    for (let i = 0; i < validIds.length; i += batchSize) {
+      const batch = validIds.slice(i, i + batchSize);
+      const { data, error } = await supabaseServer
+        .from('yelp_staging')
+        .select('id, status')
+        .in('id', batch);
+
+      if (error) {
+        console.error('Error fetching restaurant statuses:', error);
+        continue;
+      }
+
+      if (data && data.length > 0) {
+        statuses.push(...(data as Array<{ id: string; status: YelpStagingStatus }>));
+      }
+    }
+
+    return NextResponse.json({
+      success: true,
+      statuses,
+      total: validIds.length,
+      found: statuses.length
+    });
+  } catch (error) {
+    console.error('❌ Exception in handleGetStatuses:', {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined
+    });
+
+    return NextResponse.json(
+      {
+        success: false,
+        message: 'Internal server error while fetching restaurant statuses',
+        statuses: []
+      },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * Handler to get status counts for a city or import log
+ */
+async function handleGetStatusCounts(body: any): Promise<NextResponse> {
+  try {
+    const { cityId, importLogId } = body;
+
+    if ((!cityId || typeof cityId !== 'string' || cityId.trim().length === 0) &&
+        (!importLogId || typeof importLogId !== 'string' || importLogId.trim().length === 0)) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: 'Invalid cityId or importLogId: at least one non-empty string is required'
+        },
+        { status: 400 }
+      );
+    }
+
+    let query = supabaseServer
+      .from('yelp_staging')
+      .select('status');
+
+    if (cityId && typeof cityId === 'string' && cityId.trim().length > 0) {
+      query = query.eq('city_id', cityId.trim());
+    } else if (importLogId && typeof importLogId === 'string' && importLogId.trim().length > 0) {
+      query = query.eq('yelp_import_log', importLogId.trim());
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('Error fetching status counts:', error);
+      return NextResponse.json(
+        {
+          success: false,
+          message: 'Failed to fetch status counts'
+        },
+        { status: 500 }
+      );
+    }
+
+    const counts: Record<YelpStagingStatus, number> = {
+      new: 0,
+      duplicate: 0,
+      approved: 0,
+      rejected: 0
+    };
+
+    (data || []).forEach((row: { status?: YelpStagingStatus }) => {
+      const status = row.status;
+      if (status && counts[status] !== undefined) {
+        counts[status] += 1;
+      }
+    });
+
+    const total = counts.new + counts.approved + counts.rejected;
+
+    return NextResponse.json({
+      success: true,
+      counts: {
+        ...counts,
+        total
+      }
+    });
+  } catch (error) {
+    console.error('❌ Exception in handleGetStatusCounts:', {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined
+    });
+
+    return NextResponse.json(
+      {
+        success: false,
+        message: 'Internal server error while fetching status counts'
       },
       { status: 500 }
     );

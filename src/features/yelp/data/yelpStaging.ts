@@ -126,14 +126,20 @@ export async function getStagingBusinessesByHexagon(h3Id: string): Promise<YelpS
  * Get staging businesses and convert to YelpBusiness format
  * Useful for reconstructing HexagonYelpResult from cache
  */
-export async function getStagingBusinessesAsYelpBusinesses(h3Id: string): Promise<YelpBusiness[]> {
+export async function getStagingBusinessesAsYelpBusinesses(
+  h3Id: string,
+  options?: { includeRejected?: boolean }
+): Promise<YelpBusiness[]> {
   try {
     const stagingRecords = await getStagingBusinessesByHexagon(h3Id);
     
-    // Filter to only 'new' or 'approved' status (exclude 'rejected' and 'duplicate')
-    const validRecords = stagingRecords.filter(
-      record => record.status === 'new' || record.status === 'approved'
-    );
+    const includeRejected = options?.includeRejected === true;
+    // Filter to only 'new' or 'approved' status (exclude 'rejected' and 'duplicate' by default)
+    const validRecords = stagingRecords.filter(record => {
+      if (record.status === 'new' || record.status === 'approved') return true;
+      if (includeRejected && record.status === 'rejected') return true;
+      return false;
+    });
     
     // Convert staging data to YelpBusiness format
     const businesses: YelpBusiness[] = [];

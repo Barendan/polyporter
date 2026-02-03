@@ -64,7 +64,7 @@ export async function getCachedRestaurantData(cityId: string): Promise<CachedRes
       
       try {
         // Get restaurants from staging table
-        const restaurants = await getStagingBusinessesAsYelpBusinesses(hextile.h3_id);
+        const restaurants = await getStagingBusinessesAsYelpBusinesses(hextile.h3_id, { includeRejected: true });
         
         // Skip hexagons with no restaurants (zombie hexagons from old system)
         if (restaurants.length === 0) {
@@ -149,22 +149,29 @@ export async function checkCacheStatus(cityId: string): Promise<{
     
     const finalCount = hexagonCount || 0;
     
-    // Get sum of total businesses from hexagons for better estimate
-    const { data: hexagons } = await supabaseServer
-      .from('yelp_hextiles')
-      .select('yelp_total_businesses')
+    // Also ensure we have staged restaurants for this city
+    // This prevents "cache available" when hexes exist but staging is empty
+    const { count: stagingCount, error: stagingError } = await supabaseServer
+      .from('yelp_staging')
+      .select('id', { count: 'exact', head: true })
       .eq('city_id', cityId)
-      .in('status', ['fetched', 'dense']);
+      .in('status', ['new', 'approved']);
     
-    const estimatedRestaurants = hexagons?.reduce(
-      (sum, hex) => sum + (hex.yelp_total_businesses || 0), 
-      0
-    ) || 0;
+    if (stagingError) {
+      console.error('Error checking staging cache status:', stagingError);
+      return {
+        hasCachedData: false,
+        hexagonCount: 0,
+        estimatedRestaurants: 0
+      };
+    }
+    
+    const finalStagingCount = stagingCount || 0;
     
     return {
-      hasCachedData: finalCount > 0,
+      hasCachedData: finalCount > 0 && finalStagingCount > 0,
       hexagonCount: finalCount,
-      estimatedRestaurants
+      estimatedRestaurants: finalStagingCount
     };
     
   } catch (error) {

@@ -236,7 +236,7 @@ export async function processHexagons(
                 const center = getHextileCenter(h3Id);
                 if (center) {
                   // FIX ISSUE 2: Load businesses from staging when using cache
-                  const cachedBusinesses = await getStagingBusinessesAsYelpBusinesses(h3Id);
+                  const cachedBusinesses = await getStagingBusinessesAsYelpBusinesses(h3Id, { includeRejected: true });
                   
                   yelpResult = {
                     h3Id,
@@ -384,7 +384,7 @@ export async function processHexagons(
                   const center = getHextileCenter(h3Id);
                   if (center) {
                     // FIX ISSUE 2: Load businesses from staging when using cache
-                    const cachedBusinesses = await getStagingBusinessesAsYelpBusinesses(h3Id);
+                    const cachedBusinesses = await getStagingBusinessesAsYelpBusinesses(h3Id, { includeRejected: true });
                     
                     yelpResult = {
                       h3Id,

@@ -3,6 +3,7 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { parseRestaurantCSV, generateCsvContent, downloadCsv } from '@/features/yelp/utils/csvParser';
 import { metersToMiles, detectFranchise, getStatusColor, getStatusIcon } from '@/features/yelp/utils/restaurantUtils';
+import type { YelpStagingStatus } from '@/shared/types';
 
 // Define interfaces for Yelp testing state
 interface Restaurant {
@@ -86,6 +87,8 @@ interface RestaurantReviewPanelProps {
   setYelpResults?: (results: YelpTestResult | null) => void;
 }
 
+type HiddenRestaurantView = 'franchises' | 'zeroRating' | 'noFullAddress';
+
 export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheReload, setYelpResults }: RestaurantReviewPanelProps) {
   const [expandedDetailsHexagons, setExpandedDetailsHexagons] = useState<Set<string>>(new Set());
   const [activeTab, setActiveTab] = useState<'summary' | 'details' | 'restaurants'>('summary');
@@ -96,13 +99,22 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
   const [restaurantSearch, setRestaurantSearch] = useState<string>('');
   const [restaurantSortType, setRestaurantSortType] = useState<'alphabetical' | 'rating'>('alphabetical');
   const [showFilterDropdown, setShowFilterDropdown] = useState(false);
-  const restaurantsPerPage = 10;
+  const restaurantsPerPage = 25;
   
   // Review state - track which restaurants have been approved/rejected
   const [reviewedRestaurantIds, setReviewedRestaurantIds] = useState<Set<string>>(new Set());
   const [reviewedRestaurantStatus, setReviewedRestaurantStatus] = useState<Map<string, 'approved' | 'rejected' | 'duplicate'>>(new Map());
   const [updatingRestaurantIds, setUpdatingRestaurantIds] = useState<Set<string>>(new Set());
   const [reviewMessage, setReviewMessage] = useState<{ type: 'success' | 'error' | 'warning' | 'info'; text: string } | null>(null);
+  const [dbStatusMap, setDbStatusMap] = useState<Map<string, YelpStagingStatus>>(new Map());
+  const [dbStatusCounts, setDbStatusCounts] = useState<{
+    total: number;
+    cached?: number;
+    new: number;
+    approved: number;
+    rejected: number;
+    duplicate?: number;
+  } | null>(null);
   
   // Bulk selection state
   const [selectedRestaurantIds, setSelectedRestaurantIds] = useState<Set<string>>(new Set());
@@ -140,6 +152,8 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
   const [filterOutZeroRating, setFilterOutZeroRating] = useState(false);
   const [filterOutNoFullAddress, setFilterOutNoFullAddress] = useState(false);
   const [filterOutCached, setFilterOutCached] = useState(false);
+  const [restaurantStatusFilter, setRestaurantStatusFilter] = useState<'all' | 'new' | 'approved' | 'rejected'>('all');
+  const [hiddenRestaurantView, setHiddenRestaurantView] = useState<HiddenRestaurantView | null>(null);
 
   // Add to existing state declarations (around line 64-110):
   const [importLogs, setImportLogs] = useState<ImportLog[]>([]);
@@ -153,6 +167,21 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
 
   // Track if restaurants have been persisted to staging DB
   const [isPersistedToDb, setIsPersistedToDb] = useState(false);
+
+  useEffect(() => {
+    if (hiddenRestaurantView === 'franchises' && !filterOutFranchises) {
+      setHiddenRestaurantView(null);
+      setRestaurantPage(1);
+    }
+    if (hiddenRestaurantView === 'zeroRating' && !filterOutZeroRating) {
+      setHiddenRestaurantView(null);
+      setRestaurantPage(1);
+    }
+    if (hiddenRestaurantView === 'noFullAddress' && !filterOutNoFullAddress) {
+      setHiddenRestaurantView(null);
+      setRestaurantPage(1);
+    }
+  }, [hiddenRestaurantView, filterOutFranchises, filterOutZeroRating, filterOutNoFullAddress]);
 
   // FIX: Move early return check AFTER all hooks are called
   // All hooks must be called in the same order on every render
@@ -179,6 +208,8 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     // Don't filter out reviewed restaurants - keep them visible
     return Array.from(uniqueMap.values());
   }, [yelpResults?.newBusinesses, yelpResults?.results]);
+
+  const baseRestaurants = useMemo(() => allRestaurants, [allRestaurants]);
 
   // Create mapping from restaurant ID to hexagon ID
   // This is needed because restaurants can come from multiple hexagons
@@ -212,6 +243,124 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     return map;
   }, [yelpResults?.results, yelpResults?.newBusinesses]);
 
+  // Load current staging statuses from DB for visible restaurants
+  useEffect(() => {
+    let isActive = true;
+    const controller = new AbortController();
+
+    const loadStatuses = async () => {
+      if (!yelpResults || allRestaurants.length === 0) {
+        setDbStatusMap(new Map());
+        return;
+      }
+
+      const yelpIds = allRestaurants.map(r => r.id).filter(id => typeof id === 'string' && id.trim().length > 0);
+      if (yelpIds.length === 0) {
+        setDbStatusMap(new Map());
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/yelp/staging', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'get-statuses',
+            yelpIds
+          }),
+          signal: controller.signal
+        });
+
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.success) {
+          console.warn('Failed to load restaurant statuses:', data?.message || response.status);
+          return;
+        }
+
+        const next = new Map<string, YelpStagingStatus>();
+        if (Array.isArray(data.statuses)) {
+          data.statuses.forEach((row: { id?: string; status?: YelpStagingStatus }) => {
+            if (row?.id && row?.status) {
+              next.set(row.id, row.status);
+            }
+          });
+        }
+
+        if (isActive) {
+          setDbStatusMap(next);
+        }
+      } catch (error) {
+        if ((error as Error).name === 'AbortError') return;
+        console.warn('Failed to load restaurant statuses:', error);
+      }
+    };
+
+    loadStatuses();
+    return () => {
+      isActive = false;
+      controller.abort();
+    };
+  }, [yelpResults, allRestaurants]);
+
+  const getEffectiveStatus = useCallback(
+    (restaurantId: string): YelpStagingStatus => {
+      const dbStatus = dbStatusMap.get(restaurantId);
+      if (dbStatus) return dbStatus;
+      const reviewed = reviewedRestaurantStatus.get(restaurantId);
+      if (reviewed === 'approved' || reviewed === 'rejected' || reviewed === 'duplicate') {
+        return reviewed;
+      }
+      return 'new';
+    },
+    [dbStatusMap, reviewedRestaurantStatus]
+  );
+
+  const refreshStatusCounts = useCallback(async () => {
+    if (!yelpResults?.cityId && !yelpResults?.importLogId) {
+      setDbStatusCounts(null);
+      return;
+    }
+
+    try {
+      const payload: { action: string; cityId?: string | null; importLogId?: string | null } = {
+        action: 'get-status-counts'
+      };
+      if (yelpResults?.cityId) {
+        payload.cityId = yelpResults.cityId;
+      } else if (yelpResults?.importLogId) {
+        payload.importLogId = yelpResults.importLogId;
+      }
+
+      const response = await fetch('/api/yelp/staging', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success) {
+        console.warn('Failed to load status counts:', data?.message || response.status);
+        return;
+      }
+
+      if (data?.counts) {
+        setDbStatusCounts({
+          total: data.counts.total ?? 0,
+          new: data.counts.new ?? 0,
+          approved: data.counts.approved ?? 0,
+          rejected: data.counts.rejected ?? 0,
+          duplicate: data.counts.duplicate ?? 0
+        });
+      }
+    } catch (error) {
+      console.warn('Failed to load status counts:', error);
+    }
+  }, [yelpResults?.cityId, yelpResults?.importLogId]);
+
+  useEffect(() => {
+    refreshStatusCounts();
+  }, [refreshStatusCounts]);
+
   // Get restaurant counts
   const getRestaurantCounts = () => {
     // Use new processingStats if available
@@ -234,12 +383,12 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
   // Returns counts for each filter type and overlap
   // NOTE: This function must be defined AFTER detectFranchise since it calls it
   const getFilterStats = () => {
-    const totalCount = allRestaurants.length;
+    const totalCount = baseRestaurants.length;
     
     // Count what would be filtered by each filter
-    const franchiseCount = allRestaurants.filter(r => detectFranchise(r.name)).length;
-    const zeroRatingCount = allRestaurants.filter(r => r.rating === 0).length;
-    const noFullAddressCount = allRestaurants.filter(r => !r.location?.address1 || r.location.address1.trim() === '').length;
+    const franchiseCount = baseRestaurants.filter(r => detectFranchise(r.name)).length;
+    const zeroRatingCount = baseRestaurants.filter(r => r.rating === 0).length;
+    const noFullAddressCount = baseRestaurants.filter(r => !r.location?.address1 || r.location.address1.trim() === '').length;
     
     // Count restaurants from cached hexagons
     let cachedCount = 0;
@@ -251,7 +400,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       );
       
       if (cachedHexIds.size > 0) {
-        cachedCount = allRestaurants.filter(restaurant => {
+        cachedCount = baseRestaurants.filter(restaurant => {
           const hexId = restaurantToHexagonMap.get(restaurant.id);
           return hexId ? cachedHexIds.has(hexId) : false;
         }).length;
@@ -266,6 +415,53 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       cached: cachedCount,
     };
   };
+
+  const restaurantStatusStats = useMemo(() => {
+    let approved = 0;
+    let rejected = 0;
+    let newCount = 0;
+
+    allRestaurants.forEach(restaurant => {
+      const status = getEffectiveStatus(restaurant.id);
+      if (status === 'approved') {
+        approved++;
+      } else if (status === 'rejected') {
+        rejected++;
+      } else if (status === 'new') {
+        newCount++;
+      }
+    });
+
+    const total = dbStatusCounts?.total ?? (newCount + approved + rejected);
+    const resolvedApproved = dbStatusCounts?.approved ?? approved;
+    const resolvedRejected = dbStatusCounts?.rejected ?? rejected;
+    const resolvedNew = dbStatusCounts?.new ?? newCount;
+
+    let cached = 0;
+    if (yelpResults?.fromCache) {
+      cached = total;
+    } else if (yelpResults?.results) {
+      const cachedHexIds = new Set(
+        yelpResults.results
+          .filter(r => r.coverageQuality === 'cached')
+          .map(r => r.h3Id)
+      );
+      if (cachedHexIds.size > 0) {
+        cached = allRestaurants.filter(restaurant => {
+          const hexId = restaurantToHexagonMap.get(restaurant.id);
+          return hexId ? cachedHexIds.has(hexId) : false;
+        }).length;
+      }
+    }
+
+    return {
+      total,
+      cached,
+      approved: resolvedApproved,
+      rejected: resolvedRejected,
+      new: resolvedNew
+    };
+  }, [allRestaurants, getEffectiveStatus, yelpResults, restaurantToHexagonMap, dbStatusCounts]);
   
   /**
    * Detect duplicates between two restaurant arrays
@@ -453,6 +649,12 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       return true; // Already saved
     }
     
+    if (yelpResults?.fromCache) {
+      console.log('Cached results detected; restaurants already in staging DB, skipping batch save');
+      setIsPersistedToDb(true);
+      return true;
+    }
+    
     if (!yelpResults?.importLogId || !yelpResults?.cityId) {
       console.error('Missing import log ID or city ID for batch save');
       return false;
@@ -467,6 +669,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     
     // Group by hexagon
     const restaurantsByHexagon = new Map<string, Restaurant[]>();
+    let missingHexCount = 0;
     allRestaurants.forEach(restaurant => {
       const h3Id = restaurantToHexagonMap.get(restaurant.id);
       if (h3Id) {
@@ -475,13 +678,23 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         }
         restaurantsByHexagon.get(h3Id)!.push(restaurant);
       } else {
+        missingHexCount++;
         console.warn(`Restaurant ${restaurant.id} (${restaurant.name}) has no hexagon assignment, skipping`);
       }
     });
     
+    if (restaurantsByHexagon.size === 0) {
+      console.error('❌ No restaurants have hexagon assignments; cannot persist to DB.');
+      if (missingHexCount > 0) {
+        console.error(`❌ ${missingHexCount} restaurants missing hexagon assignments.`);
+      }
+      return false;
+    }
+    
     // Save each hexagon group
     let totalSaved = 0;
     let totalErrors = 0;
+    let anySuccess = false;
     
     for (const [h3Id, restaurants] of restaurantsByHexagon.entries()) {
       try {
@@ -500,6 +713,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         const data = await response.json();
         
         if (data.success) {
+          anySuccess = true;
           totalSaved += data.createdCount || 0;
         } else {
           totalErrors += restaurants.length;
@@ -511,14 +725,18 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       }
     }
     
-    if (totalSaved > 0) {
-      console.log(`✅ Batch saved ${totalSaved} restaurants to DB`);
+    if (anySuccess) {
+      if (totalSaved > 0) {
+        console.log(`✅ Batch saved ${totalSaved} restaurants to DB`);
+      } else {
+        console.log('✅ Batch save succeeded with no new restaurants created (all duplicates or already staged)');
+      }
       setIsPersistedToDb(true);
       return true;
-    } else {
-      console.error(`❌ Failed to save restaurants to DB (${totalErrors} errors)`);
-      return false;
     }
+    
+    console.error(`❌ Failed to save restaurants to DB (${totalErrors} errors)`);
+    return false;
   }, [isPersistedToDb, yelpResults, allRestaurants, restaurantToHexagonMap]);
 
   // Helper to trigger file upload when input changes
@@ -535,17 +753,74 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
 
   // Handle restaurant approval/rejection
   const handleRestaurantReview = async (restaurantId: string, status: 'approved' | 'rejected') => {
-    // Rejection is a no-op - we just track it in UI, don't save to staging
     if (status === 'rejected') {
-      setReviewedRestaurantIds(prev => new Set(prev).add(restaurantId));
-      setReviewedRestaurantStatus(prev => new Map(prev).set(restaurantId, status));
-      setSelectedRestaurantIds(prev => {
-        const next = new Set(prev);
-        next.delete(restaurantId);
-        return next;
-      });
-      setReviewMessage({ type: 'success', text: 'Restaurant rejected (not saved to staging)' });
-      setTimeout(() => setReviewMessage(null), 3000);
+      try {
+        setUpdatingRestaurantIds(prev => new Set(prev).add(restaurantId));
+        
+        // BATCH SAVE on first approve/reject
+        if (!isPersistedToDb) {
+          setReviewMessage({ 
+            type: 'info', 
+            text: 'Saving all restaurants to staging database...' 
+          });
+          
+          const saveSuccess = await batchSaveAllToDb();
+          
+          if (!saveSuccess) {
+            throw new Error('Failed to save restaurants to database');
+          }
+        }
+        
+        // Update the specific restaurant status to 'rejected'
+        const response = await fetch('/api/yelp/staging', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'update-status',
+            yelpId: restaurantId,
+            status: 'rejected'
+          })
+        });
+        
+        const data = await response.json();
+        
+        if (!data.success) {
+          throw new Error(data.message || 'Failed to update status');
+        }
+        
+        // Mark as reviewed in UI
+        setReviewedRestaurantIds(prev => new Set(prev).add(restaurantId));
+        setReviewedRestaurantStatus(prev => new Map(prev).set(restaurantId, status));
+        setDbStatusMap(prev => {
+          const next = new Map(prev);
+          next.set(restaurantId, status);
+          return next;
+        });
+        void refreshStatusCounts();
+        
+        setReviewMessage({ type: 'success', text: 'Restaurant rejected and saved to staging' });
+        setTimeout(() => setReviewMessage(null), 3000);
+        
+        // Remove from selection if selected
+        setSelectedRestaurantIds(prev => {
+          const next = new Set(prev);
+          next.delete(restaurantId);
+          return next;
+        });
+      } catch (error) {
+        console.error('Error rejecting restaurant:', error);
+        setReviewMessage({ 
+          type: 'error', 
+          text: error instanceof Error ? error.message : 'Failed to reject restaurant' 
+        });
+        setTimeout(() => setReviewMessage(null), 5000);
+      } finally {
+        setUpdatingRestaurantIds(prev => {
+          const next = new Set(prev);
+          next.delete(restaurantId);
+          return next;
+        });
+      }
       return;
     }
 
@@ -598,6 +873,12 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       // Mark as reviewed in UI
       setReviewedRestaurantIds(prev => new Set(prev).add(restaurantId));
       setReviewedRestaurantStatus(prev => new Map(prev).set(restaurantId, 'approved'));
+      setDbStatusMap(prev => {
+        const next = new Map(prev);
+        next.set(restaurantId, 'approved');
+        return next;
+      });
+      void refreshStatusCounts();
       
       setReviewMessage({ 
         type: 'success', 
@@ -682,7 +963,6 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       return;
     }
 
-    // Rejection is a no-op - we just track it in UI, don't save to staging
     if (status === 'rejected') {
       if (!skipConfirmation) {
         setConfirmationDialog({
@@ -693,22 +973,163 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         return;
       }
       
-      // Track rejected restaurants
-      setReviewedRestaurantIds(prev => {
-        const next = new Set(prev);
-        selectedIds.forEach(id => next.add(id));
-        return next;
-      });
-      setReviewedRestaurantStatus(prev => {
-        const next = new Map(prev);
-        selectedIds.forEach(id => next.set(id, status));
-        return next;
-      });
-      setSelectedRestaurantIds(new Set());
-      setReviewMessage({ type: 'success', text: `Rejected ${selectedIds.length} restaurant${selectedIds.length === 1 ? '' : 's'} (not saved to staging)` });
-      setTimeout(() => setReviewMessage(null), 4000);
-      if (confirmationDialog.isOpen) {
-        setConfirmationDialog({ isOpen: false, action: null, count: 0 });
+      try {
+        setIsBulkUpdating(true);
+        setBulkProgress({
+          processed: 0,
+          total: selectedIds.length,
+          isActive: true
+        });
+        
+        setUpdatingRestaurantIds(prev => {
+          const next = new Set(prev);
+          selectedIds.forEach(id => next.add(id));
+          return next;
+        });
+        
+        // BATCH SAVE on first approve/reject
+        if (!isPersistedToDb) {
+          setReviewMessage({ 
+            type: 'info', 
+            text: 'Saving all restaurants to staging database...' 
+          });
+          
+          const saveSuccess = await batchSaveAllToDb();
+          
+          if (!saveSuccess) {
+            throw new Error('Failed to save restaurants to database');
+          }
+        }
+        
+        if (!yelpResults?.fromCache && (!yelpResults?.importLogId || !yelpResults?.cityId)) {
+          throw new Error('Missing import log ID or city ID. Please run a new search.');
+        }
+        
+        // Update status for all selected restaurants (they're already in DB from batch save)
+        const response = await fetch('/api/yelp/staging', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'bulk-update-status',
+            yelpIds: selectedIds,
+            status: 'rejected'
+          })
+        });
+        
+        const data = await response.json();
+        
+        let totalUpdated = 0;
+        let totalErrors = 0;
+        const errors: string[] = [];
+        let successfulIds = selectedIds;
+        let failedIds: string[] = [];
+        
+        if (response.ok && data.success) {
+          totalUpdated = data.successCount || 0;
+          totalErrors = data.failedCount || 0;
+          
+          if (data.failedIds && data.failedIds.length > 0) {
+            failedIds = data.failedIds;
+            errors.push(`Failed to update ${data.failedIds.length} restaurant(s)`);
+          }
+          
+          if (failedIds.length > 0) {
+            const failedSet = new Set(failedIds);
+            successfulIds = selectedIds.filter(id => !failedSet.has(id));
+          }
+          
+          // Update progress
+          setBulkProgress({
+            processed: totalUpdated,
+            total: selectedIds.length,
+            isActive: true
+          });
+        } else {
+          totalErrors = selectedIds.length;
+          errors.push(`Failed to update restaurant statuses: ${data.message || 'Unknown error'}`);
+          successfulIds = [];
+          failedIds = selectedIds;
+        }
+        
+        // Track reviewed restaurants and their status
+        if (successfulIds.length > 0) {
+          setReviewedRestaurantIds(prev => {
+            const next = new Set(prev);
+            successfulIds.forEach(id => next.add(id));
+            return next;
+          });
+          setReviewedRestaurantStatus(prev => {
+            const next = new Map(prev);
+            successfulIds.forEach(id => next.set(id, status));
+            return next;
+          });
+          setDbStatusMap(prev => {
+            const next = new Map(prev);
+            successfulIds.forEach(id => next.set(id, status));
+            return next;
+          });
+          void refreshStatusCounts();
+        }
+        
+        // Clear selection and localStorage (keep failed selected)
+        if (failedIds.length > 0) {
+          setSelectedRestaurantIds(new Set(failedIds));
+        } else {
+          setSelectedRestaurantIds(new Set());
+          if (typeof window !== 'undefined') {
+            try {
+              localStorage.removeItem('restaurantSelections');
+            } catch (error) {
+              console.warn('Failed to clear selections from localStorage:', error);
+            }
+          }
+        }
+        
+        // Show success/error message
+        if (totalUpdated > 0 && errors.length === 0) {
+          setReviewMessage({ 
+            type: 'success', 
+            text: `Successfully rejected ${totalUpdated} restaurant${totalUpdated === 1 ? '' : 's'}!` 
+          });
+        } else if (totalUpdated > 0) {
+          setReviewMessage({ 
+            type: 'error', 
+            text: `Partially completed: ${totalUpdated} rejected, ${totalErrors} failed. ${errors.slice(0, 2).join('; ')}` 
+          });
+        } else {
+          throw new Error(`Failed to reject any restaurants. ${errors.join('; ')}`);
+        }
+        setTimeout(() => setReviewMessage(null), 6000);
+        
+        // Reset to first page if needed
+        if (restaurantPage > 1 && processedRestaurants.length <= selectedIds.length) {
+          setRestaurantPage(1);
+        }
+      } catch (error) {
+        console.error('Error bulk rejecting restaurants:', error);
+        const errorMessage = error instanceof Error ? error.message : 'Failed to bulk reject restaurants';
+        setReviewMessage({ 
+          type: 'error', 
+          text: `${errorMessage}. Please try again or select fewer restaurants.` 
+        });
+        setTimeout(() => setReviewMessage(null), 6000);
+      } finally {
+        setIsBulkUpdating(false);
+        setBulkProgress({
+          processed: 0,
+          total: 0,
+          isActive: false
+        });
+        
+        setUpdatingRestaurantIds(prev => {
+          const next = new Set(prev);
+          selectedIds.forEach(id => next.delete(id));
+          return next;
+        });
+        // Close confirmation dialog if open
+        if (confirmationDialog.isOpen) {
+          setConfirmationDialog({ isOpen: false, action: null, count: 0 });
+        }
       }
       return;
     }
@@ -742,7 +1163,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         }
       }
 
-      if (!yelpResults?.importLogId || !yelpResults?.cityId) {
+      if (!yelpResults?.fromCache && (!yelpResults?.importLogId || !yelpResults?.cityId)) {
         throw new Error('Missing import log ID or city ID. Please run a new search.');
       }
 
@@ -793,6 +1214,12 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         selectedIds.forEach(id => next.set(id, status));
         return next;
       });
+      setDbStatusMap(prev => {
+        const next = new Map(prev);
+        selectedIds.forEach(id => next.set(id, status));
+        return next;
+      });
+      void refreshStatusCounts();
       
       // Clear selection and localStorage
       setSelectedRestaurantIds(new Set());
@@ -883,8 +1310,8 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
   };
 
   // Filtered and sorted restaurants for restaurants tab - simplified
-  const processedRestaurants = useMemo(() => {
-    let restaurants = allRestaurants;
+  const visibleProcessedRestaurants = useMemo(() => {
+    let restaurants = baseRestaurants;
     
     // Apply franchise filter FIRST (before search)
     if (filterOutFranchises) {
@@ -920,6 +1347,11 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       }
     }
     
+    // Apply status filter BEFORE search
+    if (restaurantStatusFilter !== 'all') {
+      restaurants = restaurants.filter(r => getEffectiveStatus(r.id) === restaurantStatusFilter);
+    }
+    
     // Apply search filter
     if (restaurantSearch) {
       const searchLower = restaurantSearch.toLowerCase();
@@ -947,7 +1379,62 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     });
     
     return sorted;
-  }, [restaurantSearch, restaurantSortOrder, restaurantSortType, yelpResults, filterOutFranchises, filterOutZeroRating, filterOutNoFullAddress, filterOutCached, restaurantToHexagonMap, allRestaurants]);
+  }, [restaurantSearch, restaurantSortOrder, restaurantSortType, restaurantStatusFilter, yelpResults, filterOutFranchises, filterOutZeroRating, filterOutNoFullAddress, filterOutCached, restaurantToHexagonMap, baseRestaurants, getEffectiveStatus]);
+
+  const hiddenProcessedRestaurants = useMemo(() => {
+    if (!hiddenRestaurantView) {
+      return [];
+    }
+    
+    let restaurants = baseRestaurants;
+    
+    if (hiddenRestaurantView === 'franchises') {
+      restaurants = restaurants.filter(r => detectFranchise(r.name));
+    }
+    
+    if (hiddenRestaurantView === 'zeroRating') {
+      restaurants = restaurants.filter(r => r.rating === 0);
+    }
+    
+    if (hiddenRestaurantView === 'noFullAddress') {
+      restaurants = restaurants.filter(r => !r.location?.address1 || r.location.address1.trim() === '');
+    }
+    
+    // Apply status filter BEFORE search
+    if (restaurantStatusFilter !== 'all') {
+      restaurants = restaurants.filter(r => getEffectiveStatus(r.id) === restaurantStatusFilter);
+    }
+    
+    // Apply search filter
+    if (restaurantSearch) {
+      const searchLower = restaurantSearch.toLowerCase();
+      restaurants = restaurants.filter(r => 
+        (r.name && r.name.toLowerCase().includes(searchLower)) ||
+        (r.categories && r.categories.some(cat => cat.title && cat.title.toLowerCase().includes(searchLower))) ||
+        (r.location && r.location.city && r.location.city.toLowerCase().includes(searchLower))
+      );
+    }
+    
+    // Apply sorting based on sort type - create a new array to avoid mutation
+    const sorted = [...restaurants].sort((a, b) => {
+      let comparison = 0;
+      
+      if (restaurantSortType === 'alphabetical') {
+        const nameA = a.name || '';
+        const nameB = b.name || '';
+        comparison = nameA.localeCompare(nameB);
+      } else if (restaurantSortType === 'rating') {
+        // Sort by rating (higher first for desc, lower first for asc)
+        comparison = a.rating - b.rating;
+      }
+      
+      return restaurantSortOrder === 'asc' ? comparison : -comparison;
+    });
+    
+    return sorted;
+  }, [hiddenRestaurantView, restaurantSearch, restaurantSortOrder, restaurantSortType, restaurantStatusFilter, baseRestaurants, getEffectiveStatus]);
+
+  const processedRestaurants = hiddenRestaurantView ? hiddenProcessedRestaurants : visibleProcessedRestaurants;
 
   // Paginated restaurants
   const paginatedRestaurants = useMemo(() => {
@@ -970,7 +1457,12 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     const totalSelected = selectedRestaurantIds.size;
     const visibleSelected = processedRestaurants.filter(r => selectedRestaurantIds.has(r.id)).length;
     const totalVisible = processedRestaurants.length;
-    const hasSearchOrFilter = restaurantSearch.length > 0;
+    const hasSearchOrFilter = restaurantSearch.length > 0 ||
+      filterOutFranchises ||
+      filterOutZeroRating ||
+      filterOutNoFullAddress ||
+      filterOutCached ||
+      restaurantStatusFilter !== 'all';
     
     return {
       totalSelected,
@@ -979,7 +1471,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       hasSearchOrFilter,
       hasHiddenSelections: totalSelected > visibleSelected && hasSearchOrFilter
     };
-  }, [selectedRestaurantIds, processedRestaurants, restaurantSearch]);
+  }, [selectedRestaurantIds, processedRestaurants, restaurantSearch, filterOutFranchises, filterOutZeroRating, filterOutNoFullAddress, filterOutCached, restaurantStatusFilter]);
 
   // Select all restaurants on current page (must be after paginatedRestaurants is defined)
   const selectAllOnPage = () => {
@@ -1386,16 +1878,35 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                       <div className="flex items-center justify-between">
                         <div>
                           <div className="text-xs font-semibold text-emerald-300 uppercase tracking-wider mb-1">Restaurants Found</div>
-                          <div className="text-5xl font-black text-white">{getRestaurantCounts().unique}</div>
+                          <div className="text-5xl font-black text-white">{restaurantStatusStats.total}</div>
                           <div className="text-sm text-emerald-200 font-semibold mt-1">
-                            {yelpResults.fromCache ? 'Total Cached' : 'Unique in This Search'}
+                            Total Imported
                           </div>
                           <div className="flex gap-3 mt-2 text-xs">
-                            <span className="text-gray-300">{getRestaurantCounts().total} total found</span>
+                            <span className="text-gray-300">Cached: {restaurantStatusStats.cached}</span>
                           </div>
                         </div>
                         <div className="text-6xl opacity-30">✨</div>
                       </div>
+                    </div>
+                  </div>
+
+                  {/* Restaurant Status Overview */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                    <div className="bg-white/5 backdrop-blur-xl rounded-lg p-3 border border-white/10">
+                      <div className="text-xs font-semibold text-yellow-300 uppercase tracking-wider">New</div>
+                      <div className="text-2xl font-bold text-white">{restaurantStatusStats.new}</div>
+                      <div className="text-[11px] text-gray-400">Unreviewed</div>
+                    </div>
+                    <div className="bg-white/5 backdrop-blur-xl rounded-lg p-3 border border-white/10">
+                      <div className="text-xs font-semibold text-emerald-300 uppercase tracking-wider">Approved</div>
+                      <div className="text-2xl font-bold text-white">{restaurantStatusStats.approved}</div>
+                      <div className="text-[11px] text-gray-400">Accepted</div>
+                    </div>
+                    <div className="bg-white/5 backdrop-blur-xl rounded-lg p-3 border border-white/10">
+                      <div className="text-xs font-semibold text-red-300 uppercase tracking-wider">Rejected</div>
+                      <div className="text-2xl font-bold text-white">{restaurantStatusStats.rejected}</div>
+                      <div className="text-[11px] text-gray-400">Removed</div>
                     </div>
                   </div>
                   
@@ -1790,7 +2301,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                     <div className="bg-white/20 backdrop-blur-lg rounded-xl px-5 py-2 border border-white/40 shadow-lg">
                       <div className="text-2xl font-black text-white tracking-tight">{processedRestaurants.length}</div>
                       <div className="text-[10px] text-white/95 font-semibold uppercase tracking-wide">
-                        {processedRestaurants.length === allRestaurants.length ? 'Total' : 'Found'}
+                        {hiddenRestaurantView ? 'Hidden' : (processedRestaurants.length === baseRestaurants.length ? 'Total' : 'Found')}
                       </div>
                     </div>
                   </div>
@@ -1799,7 +2310,21 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                 {/* Filter Statistics Banner - Shows when filters are active */}
                 {(filterOutFranchises || filterOutZeroRating || filterOutNoFullAddress || filterOutCached) && (() => {
                   const stats = getFilterStats();
-                  const filteredOutCount = stats.total - processedRestaurants.length;
+                  const filteredOutCount = stats.total - visibleProcessedRestaurants.length;
+                  const hiddenViewLabel = hiddenRestaurantView === 'franchises'
+                    ? 'Chains'
+                    : hiddenRestaurantView === 'zeroRating'
+                      ? '0★'
+                      : hiddenRestaurantView === 'noFullAddress'
+                        ? 'No Address'
+                        : '';
+                  const hiddenViewCount = hiddenRestaurantView === 'franchises'
+                    ? stats.franchises
+                    : hiddenRestaurantView === 'zeroRating'
+                      ? stats.zeroRating
+                      : hiddenRestaurantView === 'noFullAddress'
+                        ? stats.noFullAddress
+                        : 0;
                   
                   return (
                     <div className="bg-gradient-to-r from-orange-50 to-amber-50 px-4 py-2.5 border-b border-orange-200">
@@ -1807,28 +2332,75 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                         <div className="flex items-center gap-2">
                           <span className="text-orange-600 text-lg">🔍</span>
                           <div className="text-xs">
-                            <span className="font-bold text-orange-800">
-                              {filteredOutCount} restaurant{filteredOutCount !== 1 ? 's' : ''} hidden
-                            </span>
-                            <span className="text-orange-600 ml-1">by active filters</span>
+                            {hiddenRestaurantView ? (
+                              <>
+                                <span className="font-bold text-orange-800">
+                                  Viewing hidden: {hiddenViewLabel} ({hiddenViewCount})
+                                </span>
+                                <span className="text-orange-600 ml-1">click tab to return</span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="font-bold text-orange-800">
+                                  {filteredOutCount} restaurant{filteredOutCount !== 1 ? 's' : ''} hidden
+                                </span>
+                                <span className="text-orange-600 ml-1">by active filters</span>
+                              </>
+                            )}
                           </div>
                         </div>
                         
                         <div className="flex items-center gap-2 text-[10px]">
                           {filterOutFranchises && (
-                            <span className="bg-red-100 text-red-700 px-2 py-1 rounded-full font-semibold">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setHiddenRestaurantView(prev => prev === 'franchises' ? null : 'franchises');
+                                setRestaurantPage(1);
+                              }}
+                              aria-pressed={hiddenRestaurantView === 'franchises'}
+                              className={`px-2 py-1 rounded-full font-semibold transition-colors ${
+                                hiddenRestaurantView === 'franchises'
+                                  ? 'bg-red-200 text-red-800 ring-1 ring-red-300'
+                                  : 'bg-red-100 text-red-700 hover:bg-red-200'
+                              }`}
+                            >
                               🚫 {stats.franchises} chains
-                            </span>
+                            </button>
                           )}
                           {filterOutZeroRating && (
-                            <span className="bg-yellow-100 text-yellow-700 px-2 py-1 rounded-full font-semibold">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setHiddenRestaurantView(prev => prev === 'zeroRating' ? null : 'zeroRating');
+                                setRestaurantPage(1);
+                              }}
+                              aria-pressed={hiddenRestaurantView === 'zeroRating'}
+                              className={`px-2 py-1 rounded-full font-semibold transition-colors ${
+                                hiddenRestaurantView === 'zeroRating'
+                                  ? 'bg-yellow-200 text-yellow-800 ring-1 ring-yellow-300'
+                                  : 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
+                              }`}
+                            >
                               ⭐ {stats.zeroRating} unrated
-                            </span>
+                            </button>
                           )}
                           {filterOutNoFullAddress && (
-                            <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded-full font-semibold">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setHiddenRestaurantView(prev => prev === 'noFullAddress' ? null : 'noFullAddress');
+                                setRestaurantPage(1);
+                              }}
+                              aria-pressed={hiddenRestaurantView === 'noFullAddress'}
+                              className={`px-2 py-1 rounded-full font-semibold transition-colors ${
+                                hiddenRestaurantView === 'noFullAddress'
+                                  ? 'bg-blue-200 text-blue-800 ring-1 ring-blue-300'
+                                  : 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                              }`}
+                            >
                               📍 {stats.noFullAddress} no address
-                            </span>
+                            </button>
                           )}
                           {filterOutCached && (
                             <span className="bg-purple-100 text-purple-700 px-2 py-1 rounded-full font-semibold">
@@ -1942,6 +2514,25 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                         </span>
                       </button>
                       
+                      {/* Rejected Status Filter Button */}
+                      <button
+                        onClick={() => {
+                          setRestaurantStatusFilter(restaurantStatusFilter === 'rejected' ? 'all' : 'rejected');
+                          setRestaurantPage(1); // Reset pagination
+                        }}
+                        className={`px-3 py-2 font-bold rounded-lg focus:ring-2 transition-all duration-200 shadow-sm hover:shadow-md transform hover:scale-[1.02] active:scale-95 flex items-center justify-center gap-1.5 whitespace-nowrap text-xs ${
+                          restaurantStatusFilter === 'rejected'
+                            ? 'bg-gradient-to-r from-red-500 to-rose-600 text-white hover:from-red-600 hover:to-rose-700 focus:ring-red-300'
+                            : 'bg-white text-gray-700 border border-gray-300 hover:border-red-400 hover:bg-red-50 focus:ring-red-200'
+                        }`}
+                        title={restaurantStatusFilter === 'rejected' ? 'Show all statuses' : 'Show rejected restaurants'}
+                      >
+                        <span>✗</span>
+                        <span className="hidden sm:inline">
+                          {restaurantStatusFilter === 'rejected' ? 'Rejected On' : 'Rejected'}
+                        </span>
+                      </button>
+                      
                       {/* Filter Button with Dropdown */}
                       <div className="relative" data-filter-dropdown>
                         <button
@@ -1954,7 +2545,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                         
                         {/* Dropdown Menu */}
                         {showFilterDropdown && (
-                          <div className="absolute right-0 top-full mt-1 bg-white rounded-lg shadow-xl border-2 border-purple-200 z-50 min-w-[200px] overflow-hidden">
+                          <div className="absolute right-0 top-full mt-1 bg-white rounded-lg shadow-xl border-2 border-purple-200 z-50 min-w-[220px] max-h-[360px] overflow-y-auto">
                             <div className="p-2">
                               <div className="text-xs font-bold text-gray-600 px-2 py-1 uppercase">Sort By</div>
                               
@@ -2005,6 +2596,77 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                                   <span className="text-xs">
                                     {restaurantSortOrder === 'desc' ? 'High→Low ↓' : 'Low→High ↑'}
                                   </span>
+                                )}
+                              </button>
+                            </div>
+                            <div className="p-2 border-t border-purple-100">
+                              <div className="text-xs font-bold text-gray-600 px-2 py-1 uppercase">Status Filter</div>
+                              
+                              <button
+                                onClick={() => {
+                                  setRestaurantStatusFilter('new');
+                                  setRestaurantPage(1);
+                                }}
+                                className={`w-full text-left px-3 py-2 rounded-lg text-sm font-semibold transition-all flex items-center justify-between ${
+                                  restaurantStatusFilter === 'new'
+                                    ? 'bg-yellow-100 text-yellow-900'
+                                    : 'text-gray-700 hover:bg-yellow-50'
+                                }`}
+                              >
+                                <span>New</span>
+                                {restaurantStatusFilter === 'new' && (
+                                  <span className="text-xs">●</span>
+                                )}
+                              </button>
+                              
+                              <button
+                                onClick={() => {
+                                  setRestaurantStatusFilter('approved');
+                                  setRestaurantPage(1);
+                                }}
+                                className={`w-full text-left px-3 py-2 rounded-lg text-sm font-semibold transition-all flex items-center justify-between mt-1 ${
+                                  restaurantStatusFilter === 'approved'
+                                    ? 'bg-green-100 text-green-900'
+                                    : 'text-gray-700 hover:bg-green-50'
+                                }`}
+                              >
+                                <span>Approved</span>
+                                {restaurantStatusFilter === 'approved' && (
+                                  <span className="text-xs">✓</span>
+                                )}
+                              </button>
+                              
+                              <button
+                                onClick={() => {
+                                  setRestaurantStatusFilter('rejected');
+                                  setRestaurantPage(1);
+                                }}
+                                className={`w-full text-left px-3 py-2 rounded-lg text-sm font-semibold transition-all flex items-center justify-between mt-1 ${
+                                  restaurantStatusFilter === 'rejected'
+                                    ? 'bg-red-100 text-red-900'
+                                    : 'text-gray-700 hover:bg-red-50'
+                                }`}
+                              >
+                                <span>Rejected</span>
+                                {restaurantStatusFilter === 'rejected' && (
+                                  <span className="text-xs">✗</span>
+                                )}
+                              </button>
+
+                              <button
+                                onClick={() => {
+                                  setRestaurantStatusFilter('all');
+                                  setRestaurantPage(1);
+                                }}
+                                className={`w-full text-left px-3 py-2 rounded-lg text-sm font-semibold transition-all flex items-center justify-between mt-1 ${
+                                  restaurantStatusFilter === 'all'
+                                    ? 'bg-gray-100 text-gray-800'
+                                    : 'text-gray-700 hover:bg-gray-50'
+                                }`}
+                              >
+                                <span>All Statuses</span>
+                                {restaurantStatusFilter === 'all' && (
+                                  <span className="text-xs">•</span>
                                 )}
                               </button>
                             </div>
@@ -2178,11 +2840,19 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
               {paginatedRestaurants.length > 0 ? (
                 <>
                   <div className="space-y-2">
-                  {paginatedRestaurants.map((restaurant, idx) => (
-                <div key={restaurant.id || idx} className={`group bg-gradient-to-br from-white via-blue-50/20 to-purple-50/20 p-3 rounded-xl border transition-all duration-200 ${
+                  {paginatedRestaurants.map((restaurant, idx) => {
+                    const effectiveStatus = getEffectiveStatus(restaurant.id);
+                    const statusBorderClass = effectiveStatus === 'approved'
+                      ? 'border-green-300'
+                      : effectiveStatus === 'rejected'
+                        ? 'border-red-300'
+                        : 'border-yellow-300';
+
+                    return (
+                <div key={restaurant.id || idx} className={`group bg-gradient-to-br from-white via-blue-50/20 to-purple-50/20 p-3 rounded-xl border transition-all duration-200 ${statusBorderClass} ${
                   selectedRestaurantIds.has(restaurant.id) 
-                    ? 'border-green-400 shadow-lg bg-green-50/30' 
-                    : 'border-gray-200 hover:border-purple-300 hover:shadow-md'
+                    ? 'ring-1 ring-gray-200 shadow-lg' 
+                    : 'hover:shadow-md'
                 }`}>
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-start gap-2 flex-1 min-w-0">
@@ -2203,12 +2873,17 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                               <span>💾</span> Cached
                             </span>
                           )}
-                          {reviewedRestaurantIds.has(restaurant.id) && reviewedRestaurantStatus.get(restaurant.id) === 'approved' && (
+                          {effectiveStatus === 'new' && (
+                            <span className="bg-yellow-100 text-yellow-800 text-[10px] font-bold px-2 py-0.5 rounded-full shadow-sm flex items-center gap-0.5">
+                              <span className="text-xs">•</span> New
+                            </span>
+                          )}
+                          {effectiveStatus === 'approved' && (
                             <span className="bg-gradient-to-r from-green-500 to-emerald-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-sm flex items-center gap-0.5">
                               <span className="text-xs">✓</span> Approved
                             </span>
                           )}
-                          {reviewedRestaurantIds.has(restaurant.id) && reviewedRestaurantStatus.get(restaurant.id) === 'rejected' && (
+                          {effectiveStatus === 'rejected' && (
                             <span className="bg-gradient-to-r from-red-500 to-rose-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-sm flex items-center gap-0.5">
                               <span className="text-xs">✗</span> Rejected
                             </span>
@@ -2276,7 +2951,8 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                     </div>
                   </div>
                 </div>
-              ))}
+                    );
+                  })}
                   </div>
               
                   {/* Pagination - Compact */}
