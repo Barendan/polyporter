@@ -107,6 +107,15 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
   const [updatingRestaurantIds, setUpdatingRestaurantIds] = useState<Set<string>>(new Set());
   const [reviewMessage, setReviewMessage] = useState<{ type: 'success' | 'error' | 'warning' | 'info'; text: string } | null>(null);
   const [dbStatusMap, setDbStatusMap] = useState<Map<string, YelpStagingStatus>>(new Map());
+  const [fetchedStatusCounts, setFetchedStatusCounts] = useState<{
+    total: number;
+    found: number;
+    missing: number;
+    approved: number;
+    rejected: number;
+    duplicate: number;
+    new: number;
+  } | null>(null);
   const [dbStatusCounts, setDbStatusCounts] = useState<{
     total: number;
     cached?: number;
@@ -251,12 +260,14 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     const loadStatuses = async () => {
       if (!yelpResults || allRestaurants.length === 0) {
         setDbStatusMap(new Map());
+        setFetchedStatusCounts(null);
         return;
       }
 
       const yelpIds = allRestaurants.map(r => r.id).filter(id => typeof id === 'string' && id.trim().length > 0);
       if (yelpIds.length === 0) {
         setDbStatusMap(new Map());
+        setFetchedStatusCounts(null);
         return;
       }
 
@@ -278,16 +289,40 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         }
 
         const next = new Map<string, YelpStagingStatus>();
+        let approvedCount = 0;
+        let rejectedCount = 0;
+        let duplicateCount = 0;
+        let newCount = 0;
+
         if (Array.isArray(data.statuses)) {
           data.statuses.forEach((row: { id?: string; status?: YelpStagingStatus }) => {
             if (row?.id && row?.status) {
               next.set(row.id, row.status);
+              if (row.status === 'approved') approvedCount += 1;
+              if (row.status === 'rejected') rejectedCount += 1;
+              if (row.status === 'duplicate') duplicateCount += 1;
+              if (row.status === 'new') newCount += 1;
             }
           });
         }
 
+        const total = typeof data.total === 'number' ? data.total : yelpIds.length;
+        const found = typeof data.found === 'number' ? data.found : next.size;
+        const missing = typeof data.counts?.missing === 'number'
+          ? data.counts.missing
+          : Math.max(0, total - found);
+
         if (isActive) {
           setDbStatusMap(next);
+          setFetchedStatusCounts({
+            total,
+            found,
+            missing,
+            approved: typeof data.counts?.approved === 'number' ? data.counts.approved : approvedCount,
+            rejected: typeof data.counts?.rejected === 'number' ? data.counts.rejected : rejectedCount,
+            duplicate: typeof data.counts?.duplicate === 'number' ? data.counts.duplicate : duplicateCount,
+            new: typeof data.counts?.new === 'number' ? data.counts.new : newCount
+          });
         }
       } catch (error) {
         if ((error as Error).name === 'AbortError') return;
@@ -416,6 +451,12 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     };
   };
 
+  const coverageCount = useMemo(() => {
+    const resultCount = yelpResults?.results?.length ?? 0;
+    if (resultCount > 0) return resultCount;
+    return yelpResults?.processingStats?.totalHexagons ?? 0;
+  }, [yelpResults?.results, yelpResults?.processingStats?.totalHexagons]);
+
   const restaurantStatusStats = useMemo(() => {
     let approved = 0;
     let rejected = 0;
@@ -432,14 +473,19 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       }
     });
 
-    const total = dbStatusCounts?.total ?? (newCount + approved + rejected);
-    const resolvedApproved = dbStatusCounts?.approved ?? approved;
-    const resolvedRejected = dbStatusCounts?.rejected ?? rejected;
-    const resolvedNew = dbStatusCounts?.new ?? newCount;
+    const inMemoryTotal = allRestaurants.length;
+    const useFetchedCounts = fetchedStatusCounts && fetchedStatusCounts.total > 0;
+
+    const resolvedApproved = useFetchedCounts ? fetchedStatusCounts.approved : approved;
+    const resolvedRejected = useFetchedCounts ? fetchedStatusCounts.rejected : rejected;
+    const resolvedTotal = inMemoryTotal;
+    const resolvedNew = useFetchedCounts
+      ? Math.max(0, resolvedTotal - resolvedApproved - resolvedRejected)
+      : newCount;
 
     let cached = 0;
     if (yelpResults?.fromCache) {
-      cached = total;
+      cached = resolvedTotal;
     } else if (yelpResults?.results) {
       const cachedHexIds = new Set(
         yelpResults.results
@@ -455,13 +501,13 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     }
 
     return {
-      total,
+      total: resolvedTotal,
       cached,
       approved: resolvedApproved,
       rejected: resolvedRejected,
       new: resolvedNew
     };
-  }, [allRestaurants, getEffectiveStatus, yelpResults, restaurantToHexagonMap, dbStatusCounts]);
+  }, [allRestaurants, getEffectiveStatus, yelpResults, restaurantToHexagonMap, fetchedStatusCounts]);
   
   /**
    * Detect duplicates between two restaurant arrays
@@ -1866,7 +1912,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                       <div className="flex items-center justify-between">
                         <div>
                           <div className="text-xs font-semibold text-blue-300 uppercase tracking-wider mb-1">Coverage</div>
-                          <div className="text-4xl font-black text-white">{yelpResults.results?.length || 0}</div>
+                          <div className="text-4xl font-black text-white">{coverageCount}</div>
                           <div className="text-sm text-gray-400 mt-1">Hexagons Processed</div>
                         </div>
                         <div className="text-5xl opacity-20">🗺️</div>
@@ -2288,7 +2334,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
               )}
 
               {/* Unified Control Panel - Compact Modern Design */}
-              <div className="bg-white rounded-2xl shadow-xl border border-gray-200 overflow-hidden">
+              <div className="bg-white rounded-2xl shadow-xl border border-gray-200">
                 {/* Section 1: Restaurant Directory Header */}
                 <div className="bg-gradient-to-r from-purple-500 via-pink-500 to-orange-500 px-5 py-3">
                   <div className="flex items-center justify-between gap-4">

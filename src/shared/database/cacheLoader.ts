@@ -1,6 +1,7 @@
 // Database helper functions for loading cached restaurant data
 import { supabaseServer } from '../config/supabaseServer';
-import { getHextilesByCity } from '@/features/yelp/data/hextiles';
+import { getPolygonZone } from '@/shared/database/cities';
+import { generateH3Grid } from '@/shared/geography/cityUtils';
 import { getStagingBusinessesAsYelpBusinesses } from '@/features/yelp/data/yelpStaging';
 import type { YelpBusiness } from '@/features/yelp/domain/search';
 
@@ -30,37 +31,80 @@ export interface CachedRestaurantData {
  * @param cityId - The city UUID to fetch cached data for
  * @returns Cached data or null if no data available
  */
+async function getCityHexGrid(cityId: string): Promise<string[]> {
+  try {
+    const polygonZone = await getPolygonZone(cityId);
+    if (!polygonZone) {
+      console.warn(`⚠️ No polygon zone found for city: ${cityId}`);
+      return [];
+    }
+
+    const polygon = (polygonZone.buffered_polygon || polygonZone.raw_polygon) as any;
+    if (!polygon || !polygon.geometry) {
+      console.warn(`⚠️ Invalid polygon data for city: ${cityId}`);
+      return [];
+    }
+
+    return generateH3Grid(polygon, 7);
+  } catch (error) {
+    console.error('❌ Failed to generate city H3 grid:', error);
+    return [];
+  }
+}
+
+async function getCachedHextilesByH3Ids(h3Ids: string[]) {
+  if (h3Ids.length === 0) return [];
+  const batchSize = 200;
+  const results: any[] = [];
+
+  for (let i = 0; i < h3Ids.length; i += batchSize) {
+    const batch = h3Ids.slice(i, i + batchSize);
+    const { data, error } = await supabaseServer
+      .from('yelp_hextiles')
+      .select('*')
+      .in('h3_id', batch)
+      .in('status', ['fetched', 'dense']);
+
+    if (error) {
+      console.error('Error fetching hextiles by H3 IDs:', error);
+      continue;
+    }
+
+    if (data && data.length > 0) {
+      results.push(...data);
+    }
+  }
+
+  return results;
+}
+
 export async function getCachedRestaurantData(cityId: string): Promise<CachedRestaurantData | null> {
   try {
     console.log(`📦 Loading cached restaurant data for city: ${cityId}`);
-    
-    // STEP 1: Get all successfully processed hexagons for this city
-    const hextiles = await getHextilesByCity(cityId);
+
+    // STEP 1: Build the city hex grid and fetch cached hextiles by H3 ID
+    const cityHexGrid = await getCityHexGrid(cityId);
+    if (cityHexGrid.length === 0) {
+      console.log(`⚠️ No H3 grid available for city: ${cityId}`);
+      return null;
+    }
+
+    const hextiles = await getCachedHextilesByH3Ids(cityHexGrid);
     
     if (!hextiles || hextiles.length === 0) {
       console.log(`⚠️ No cached hexagons found for city: ${cityId}`);
       return null;
     }
-    
-    // Filter to only successfully fetched hexagons
-    const validHextiles = hextiles.filter(
-      hex => hex.status === 'fetched' || hex.status === 'dense'
-    );
-    
-    if (validHextiles.length === 0) {
-      console.log(`⚠️ No valid hexagons (fetched/dense) found for city: ${cityId}`);
-      return null;
-    }
-    
-    console.log(`✅ Found ${validHextiles.length} valid hexagons for city`);
-    
+
+    console.log(`✅ Found ${hextiles.length} cached hexagons for city`);
+
     // STEP 2: For each hexagon, get the cached restaurants
     const hexagonResults: CachedHexagonResult[] = [];
     let totalRestaurantCount = 0;
     let oldestCacheDate = new Date();
     
-    for (let i = 0; i < validHextiles.length; i++) {
-      const hextile = validHextiles[i];
+    for (let i = 0; i < hextiles.length; i++) {
+      const hextile = hextiles[i];
       
       try {
         // Get restaurants from staging table
@@ -131,47 +175,53 @@ export async function checkCacheStatus(cityId: string): Promise<{
   estimatedRestaurants: number;
 }> {
   try {
-    // Query count of successfully processed hexagons
-    const { count: hexagonCount, error } = await supabaseServer
-      .from('yelp_hextiles')
-      .select('h3_id', { count: 'exact', head: true })
-      .eq('city_id', cityId)
-      .in('status', ['fetched', 'dense']);
-    
-    if (error) {
-      console.error('Error checking cache status:', error);
+    const cityHexGrid = await getCityHexGrid(cityId);
+    if (cityHexGrid.length === 0) {
       return {
         hasCachedData: false,
         hexagonCount: 0,
         estimatedRestaurants: 0
       };
     }
-    
-    const finalCount = hexagonCount || 0;
-    
-    // Also ensure we have staged restaurants for this city
-    // This prevents "cache available" when hexes exist but staging is empty
-    const { count: stagingCount, error: stagingError } = await supabaseServer
-      .from('yelp_staging')
-      .select('id', { count: 'exact', head: true })
-      .eq('city_id', cityId)
-      .in('status', ['new', 'approved']);
-    
-    if (stagingError) {
-      console.error('Error checking staging cache status:', stagingError);
-      return {
-        hasCachedData: false,
-        hexagonCount: 0,
-        estimatedRestaurants: 0
-      };
+
+    const batchSize = 200;
+    let hexagonCount = 0;
+    let estimatedRestaurants = 0;
+
+    for (let i = 0; i < cityHexGrid.length; i += batchSize) {
+      const batch = cityHexGrid.slice(i, i + batchSize);
+
+      const { count: hexCount, error: hexError } = await supabaseServer
+        .from('yelp_hextiles')
+        .select('h3_id', { count: 'exact', head: true })
+        .in('h3_id', batch)
+        .in('status', ['fetched', 'dense']);
+
+      if (hexError) {
+        console.error('Error checking cache status:', hexError);
+        continue;
+      }
+
+      hexagonCount += hexCount || 0;
+
+      const { count: stagingCount, error: stagingError } = await supabaseServer
+        .from('yelp_staging')
+        .select('id', { count: 'exact', head: true })
+        .in('h3_id', batch)
+        .in('status', ['new', 'approved']);
+
+      if (stagingError) {
+        console.error('Error checking staging cache status:', stagingError);
+        continue;
+      }
+
+      estimatedRestaurants += stagingCount || 0;
     }
-    
-    const finalStagingCount = stagingCount || 0;
-    
+
     return {
-      hasCachedData: finalCount > 0 && finalStagingCount > 0,
-      hexagonCount: finalCount,
-      estimatedRestaurants: finalStagingCount
+      hasCachedData: hexagonCount > 0 && estimatedRestaurants > 0,
+      hexagonCount,
+      estimatedRestaurants
     };
     
   } catch (error) {

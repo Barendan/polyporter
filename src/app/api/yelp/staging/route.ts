@@ -610,11 +610,32 @@ async function handleGetStatuses(body: any): Promise<NextResponse> {
       }
     }
 
+    const counts: Record<YelpStagingStatus, number> = {
+      new: 0,
+      duplicate: 0,
+      approved: 0,
+      rejected: 0
+    };
+
+    statuses.forEach((row) => {
+      if (row?.status && counts[row.status] !== undefined) {
+        counts[row.status] += 1;
+      }
+    });
+
+    const total = validIds.length;
+    const found = statuses.length;
+    const missing = Math.max(0, total - found);
+
     return NextResponse.json({
       success: true,
       statuses,
-      total: validIds.length,
-      found: statuses.length
+      total,
+      found,
+      counts: {
+        ...counts,
+        missing
+      }
     });
   } catch (error) {
     console.error('❌ Exception in handleGetStatuses:', {
