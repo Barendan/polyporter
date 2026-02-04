@@ -157,6 +157,25 @@ export async function DELETE(request: NextRequest) {
       }
     }
 
+    const { error: deleteRestaurantsError, count: deletedRestaurantsCount } = await supabaseServer
+      .from('restaurants')
+      .delete({ count: 'exact' })
+      .eq('import_log_id', normalizedLogId);
+
+    if (deleteRestaurantsError) {
+      console.error('❌ Error deleting restaurants for import log:', {
+        logId: normalizedLogId,
+        message: deleteRestaurantsError.message,
+        code: deleteRestaurantsError.code,
+        details: deleteRestaurantsError.details,
+        hint: deleteRestaurantsError.hint
+      });
+      return NextResponse.json(
+        { success: false, message: 'Failed to delete restaurants for import log' },
+        { status: 500 }
+      );
+    }
+
     const { error: deleteLogError } = await supabaseServer
       .from('yelp_import_logs')
       .delete()
@@ -180,7 +199,8 @@ export async function DELETE(request: NextRequest) {
       success: true,
       deletedLogId: normalizedLogId,
       deletedStagingCount: stagingRows?.length || 0,
-      affectedHextiles: affectedH3Ids.length
+      affectedHextiles: affectedH3Ids.length,
+      deletedRestaurantsCount: deletedRestaurantsCount || 0
     });
   } catch (error) {
     console.error('❌ Exception deleting import log:', {

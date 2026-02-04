@@ -87,7 +87,7 @@ interface RestaurantReviewPanelProps {
   setYelpResults?: (results: YelpTestResult | null) => void;
 }
 
-type HiddenRestaurantView = 'franchises' | 'zeroRating' | 'noFullAddress';
+type HiddenRestaurantView = 'franchises' | 'zeroRating' | 'reviewed';
 
 export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheReload, setYelpResults }: RestaurantReviewPanelProps) {
   const [expandedDetailsHexagons, setExpandedDetailsHexagons] = useState<Set<string>>(new Set());
@@ -99,6 +99,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
   const [restaurantSearch, setRestaurantSearch] = useState<string>('');
   const [restaurantSortType, setRestaurantSortType] = useState<'alphabetical' | 'rating'>('alphabetical');
   const [showFilterDropdown, setShowFilterDropdown] = useState(false);
+  const [showFiltersDropdown, setShowFiltersDropdown] = useState(false);
   const restaurantsPerPage = 25;
   
   // Review state - track which restaurants have been approved/rejected
@@ -139,6 +140,20 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     total: 0,
     isActive: false
   });
+
+  const [bulkStatusModal, setBulkStatusModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    details?: string;
+    isComplete: boolean;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    details: '',
+    isComplete: false
+  });
   
   // Confirmation dialog state
   const [confirmationDialog, setConfirmationDialog] = useState<{
@@ -159,7 +174,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
   // Restaurant filter state - for filtering franchises and zero-rated restaurants
   const [filterOutFranchises, setFilterOutFranchises] = useState(false);
   const [filterOutZeroRating, setFilterOutZeroRating] = useState(false);
-  const [filterOutNoFullAddress, setFilterOutNoFullAddress] = useState(false);
+  const [hideReviewed, setHideReviewed] = useState(true);
   const [filterOutCached, setFilterOutCached] = useState(false);
   const [restaurantStatusFilter, setRestaurantStatusFilter] = useState<'all' | 'new' | 'approved' | 'rejected'>('all');
   const [hiddenRestaurantView, setHiddenRestaurantView] = useState<HiddenRestaurantView | null>(null);
@@ -186,11 +201,11 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       setHiddenRestaurantView(null);
       setRestaurantPage(1);
     }
-    if (hiddenRestaurantView === 'noFullAddress' && !filterOutNoFullAddress) {
+    if (hiddenRestaurantView === 'reviewed' && !hideReviewed) {
       setHiddenRestaurantView(null);
       setRestaurantPage(1);
     }
-  }, [hiddenRestaurantView, filterOutFranchises, filterOutZeroRating, filterOutNoFullAddress]);
+  }, [hiddenRestaurantView, filterOutFranchises, filterOutZeroRating, hideReviewed]);
 
   // FIX: Move early return check AFTER all hooks are called
   // All hooks must be called in the same order on every render
@@ -252,22 +267,23 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     return map;
   }, [yelpResults?.results, yelpResults?.newBusinesses]);
 
-  // Load current staging statuses from DB for visible restaurants
-  useEffect(() => {
-    let isActive = true;
-    const controller = new AbortController();
-
-    const loadStatuses = async () => {
+  const refreshFetchedStatuses = useCallback(
+    async (options?: { signal?: AbortSignal; isActive?: () => boolean }) => {
+      const isActive = options?.isActive;
       if (!yelpResults || allRestaurants.length === 0) {
-        setDbStatusMap(new Map());
-        setFetchedStatusCounts(null);
+        if (!isActive || isActive()) {
+          setDbStatusMap(new Map());
+          setFetchedStatusCounts(null);
+        }
         return;
       }
 
       const yelpIds = allRestaurants.map(r => r.id).filter(id => typeof id === 'string' && id.trim().length > 0);
       if (yelpIds.length === 0) {
-        setDbStatusMap(new Map());
-        setFetchedStatusCounts(null);
+        if (!isActive || isActive()) {
+          setDbStatusMap(new Map());
+          setFetchedStatusCounts(null);
+        }
         return;
       }
 
@@ -279,7 +295,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
             action: 'get-statuses',
             yelpIds
           }),
-          signal: controller.signal
+          signal: options?.signal
         });
 
         const data = await response.json().catch(() => ({}));
@@ -312,7 +328,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
           ? data.counts.missing
           : Math.max(0, total - found);
 
-        if (isActive) {
+        if (!isActive || isActive()) {
           setDbStatusMap(next);
           setFetchedStatusCounts({
             total,
@@ -328,14 +344,22 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         if ((error as Error).name === 'AbortError') return;
         console.warn('Failed to load restaurant statuses:', error);
       }
-    };
+    },
+    [yelpResults, allRestaurants]
+  );
 
-    loadStatuses();
+  // Load current staging statuses from DB for visible restaurants
+  useEffect(() => {
+    let isActive = true;
+    const controller = new AbortController();
+    const isActiveCheck = () => isActive;
+
+    void refreshFetchedStatuses({ signal: controller.signal, isActive: isActiveCheck });
     return () => {
       isActive = false;
       controller.abort();
     };
-  }, [yelpResults, allRestaurants]);
+  }, [refreshFetchedStatuses]);
 
   const getEffectiveStatus = useCallback(
     (restaurantId: string): YelpStagingStatus => {
@@ -423,7 +447,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     // Count what would be filtered by each filter
     const franchiseCount = baseRestaurants.filter(r => detectFranchise(r.name)).length;
     const zeroRatingCount = baseRestaurants.filter(r => r.rating === 0).length;
-    const noFullAddressCount = baseRestaurants.filter(r => !r.location?.address1 || r.location.address1.trim() === '').length;
+    const reviewedCount = baseRestaurants.filter(r => getEffectiveStatus(r.id) !== 'new').length;
     
     // Count restaurants from cached hexagons
     let cachedCount = 0;
@@ -446,10 +470,15 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       total: totalCount,
       franchises: franchiseCount,
       zeroRating: zeroRatingCount,
-      noFullAddress: noFullAddressCount,
+      reviewed: reviewedCount,
       cached: cachedCount,
     };
   };
+
+  const filterStats = useMemo(
+    () => getFilterStats(),
+    [baseRestaurants, yelpResults, restaurantToHexagonMap, getEffectiveStatus]
+  );
 
   const coverageCount = useMemo(() => {
     const resultCount = yelpResults?.results?.length ?? 0;
@@ -843,6 +872,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
           return next;
         });
         void refreshStatusCounts();
+        void refreshFetchedStatuses();
         
         setReviewMessage({ type: 'success', text: 'Restaurant rejected and saved to staging' });
         setTimeout(() => setReviewMessage(null), 3000);
@@ -915,6 +945,32 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       if (!data.success) {
         throw new Error(data.message || 'Failed to update status');
       }
+
+      if (data.isDuplicate) {
+        setReviewedRestaurantIds(prev => new Set(prev).add(restaurantId));
+        setReviewedRestaurantStatus(prev => new Map(prev).set(restaurantId, 'duplicate'));
+        setDbStatusMap(prev => {
+          const next = new Map(prev);
+          next.set(restaurantId, 'duplicate');
+          return next;
+        });
+        void refreshStatusCounts();
+        void refreshFetchedStatuses();
+
+        setReviewMessage({ 
+          type: 'info', 
+          text: 'Restaurant already exists; marked as duplicate.' 
+        });
+        setTimeout(() => setReviewMessage(null), 4000);
+
+        setSelectedRestaurantIds(prev => {
+          const next = new Set(prev);
+          next.delete(restaurantId);
+          return next;
+        });
+
+        return;
+      }
       
       // Mark as reviewed in UI
       setReviewedRestaurantIds(prev => new Set(prev).add(restaurantId));
@@ -925,6 +981,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         return next;
       });
       void refreshStatusCounts();
+      void refreshFetchedStatuses();
       
       setReviewMessage({ 
         type: 'success', 
@@ -1026,6 +1083,13 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
           total: selectedIds.length,
           isActive: true
         });
+        setBulkStatusModal({
+          isOpen: true,
+          title: 'Bulk reject started',
+          message: `Processing ${selectedIds.length} restaurant${selectedIds.length === 1 ? '' : 's'}...`,
+          details: 'This window will update when processing completes.',
+          isComplete: false
+        });
         
         setUpdatingRestaurantIds(prev => {
           const next = new Set(prev);
@@ -1115,6 +1179,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
             return next;
           });
           void refreshStatusCounts();
+          void refreshFetchedStatuses();
         }
         
         // Clear selection and localStorage (keep failed selected)
@@ -1137,10 +1202,24 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
             type: 'success', 
             text: `Successfully rejected ${totalUpdated} restaurant${totalUpdated === 1 ? '' : 's'}!` 
           });
+          setBulkStatusModal({
+            isOpen: true,
+            title: 'Bulk reject complete',
+            message: `Rejected ${totalUpdated} restaurant${totalUpdated === 1 ? '' : 's'}.`,
+            details: 'You can close this window now.',
+            isComplete: true
+          });
         } else if (totalUpdated > 0) {
           setReviewMessage({ 
             type: 'error', 
             text: `Partially completed: ${totalUpdated} rejected, ${totalErrors} failed. ${errors.slice(0, 2).join('; ')}` 
+          });
+          setBulkStatusModal({
+            isOpen: true,
+            title: 'Bulk reject completed with issues',
+            message: `Rejected ${totalUpdated} restaurant${totalUpdated === 1 ? '' : 's'}.`,
+            details: `${totalErrors} failed. You can close this window now.`,
+            isComplete: true
           });
         } else {
           throw new Error(`Failed to reject any restaurants. ${errors.join('; ')}`);
@@ -1157,6 +1236,13 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         setReviewMessage({ 
           type: 'error', 
           text: `${errorMessage}. Please try again or select fewer restaurants.` 
+        });
+        setBulkStatusModal({
+          isOpen: true,
+          title: 'Bulk reject failed',
+          message: errorMessage,
+          details: 'Please try again or select fewer restaurants.',
+          isComplete: true
         });
         setTimeout(() => setReviewMessage(null), 6000);
       } finally {
@@ -1187,6 +1273,13 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         processed: 0,
         total: selectedIds.length,
         isActive: true
+      });
+      setBulkStatusModal({
+        isOpen: true,
+        title: 'Bulk approve started',
+        message: `Processing ${selectedIds.length} restaurant${selectedIds.length === 1 ? '' : 's'}...`,
+        details: 'This window will update when processing completes.',
+        isComplete: false
       });
       
       setUpdatingRestaurantIds(prev => {
@@ -1226,67 +1319,115 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       
       const data = await response.json();
       
-      let totalCreated = 0;
+      let approvedIds: string[] = [];
+      let duplicateIds: string[] = [];
+      let failedIds: string[] = [];
+      let totalApproved = 0;
+      let totalDuplicates = 0;
       let totalErrors = 0;
       const errors: string[] = [];
       
       if (response.ok && data.success) {
-        totalCreated = data.successCount || 0;
-        totalErrors = data.failedCount || 0;
+        approvedIds = Array.isArray(data.approvedIds) ? data.approvedIds : [];
+        duplicateIds = Array.isArray(data.duplicateIds) ? data.duplicateIds : [];
+        failedIds = Array.isArray(data.failedIds) ? data.failedIds : [];
+        totalApproved = approvedIds.length;
+        totalDuplicates = duplicateIds.length;
+        totalErrors = failedIds.length;
         
-        if (data.failedIds && data.failedIds.length > 0) {
-          errors.push(`Failed to update ${data.failedIds.length} restaurant(s)`);
+        if (totalErrors > 0) {
+          errors.push(`Failed to update ${totalErrors} restaurant(s)`);
         }
         
         // Update progress
         setBulkProgress({
-          processed: totalCreated,
+          processed: totalApproved + totalDuplicates,
           total: selectedIds.length,
           isActive: true
         });
       } else {
         totalErrors = selectedIds.length;
+        failedIds = selectedIds;
         errors.push(`Failed to update restaurant statuses: ${data.message || 'Unknown error'}`);
       }
       
       // Track reviewed restaurants and their status
-      setReviewedRestaurantIds(prev => {
-        const next = new Set(prev);
-        selectedIds.forEach(id => next.add(id));
-        return next;
-      });
-      setReviewedRestaurantStatus(prev => {
-        const next = new Map(prev);
-        selectedIds.forEach(id => next.set(id, status));
-        return next;
-      });
-      setDbStatusMap(prev => {
-        const next = new Map(prev);
-        selectedIds.forEach(id => next.set(id, status));
-        return next;
-      });
-      void refreshStatusCounts();
+      if (totalApproved > 0 || totalDuplicates > 0) {
+        setReviewedRestaurantIds(prev => {
+          const next = new Set(prev);
+          approvedIds.forEach(id => next.add(id));
+          duplicateIds.forEach(id => next.add(id));
+          return next;
+        });
+        setReviewedRestaurantStatus(prev => {
+          const next = new Map(prev);
+          approvedIds.forEach(id => next.set(id, 'approved'));
+          duplicateIds.forEach(id => next.set(id, 'duplicate'));
+          return next;
+        });
+        setDbStatusMap(prev => {
+          const next = new Map(prev);
+          approvedIds.forEach(id => next.set(id, 'approved'));
+          duplicateIds.forEach(id => next.set(id, 'duplicate'));
+          return next;
+        });
+        void refreshStatusCounts();
+        void refreshFetchedStatuses();
+      }
       
-      // Clear selection and localStorage
-      setSelectedRestaurantIds(new Set());
-      if (typeof window !== 'undefined') {
-        try {
-          localStorage.removeItem('restaurantSelections');
-        } catch (error) {
-          console.warn('Failed to clear selections from localStorage:', error);
+      // Clear selection and localStorage (keep failed selected)
+      if (failedIds.length > 0) {
+        setSelectedRestaurantIds(new Set(failedIds));
+      } else {
+        setSelectedRestaurantIds(new Set());
+        if (typeof window !== 'undefined') {
+          try {
+            localStorage.removeItem('restaurantSelections');
+          } catch (error) {
+            console.warn('Failed to clear selections from localStorage:', error);
+          }
         }
       }
       
       // Show success/error message
-      if (totalCreated > 0 && errors.length === 0) {
+      if (totalApproved > 0 && totalErrors === 0 && totalDuplicates === 0) {
         setReviewMessage({ 
           type: 'success', 
-          text: `Successfully approved ${totalCreated} restaurant${totalCreated === 1 ? '' : 's'}!` 
+          text: `Successfully approved ${totalApproved} restaurant${totalApproved === 1 ? '' : 's'}!` 
         });
-      } else if (totalCreated > 0) {
+        setBulkStatusModal({
+          isOpen: true,
+          title: 'Bulk approve complete',
+          message: `Approved ${totalApproved} restaurant${totalApproved === 1 ? '' : 's'}.`,
+          details: 'You can close this window now.',
+          isComplete: true
+        });
+      } else if (totalApproved > 0) {
+        const duplicateNote = totalDuplicates > 0
+          ? `, ${totalDuplicates} duplicate${totalDuplicates === 1 ? '' : 's'} marked`
+          : '';
         setReviewMessage({ 
           type: 'error', 
-          text: `Partially completed: ${totalCreated} approved, ${totalErrors} failed. ${errors.slice(0, 2).join('; ')}` 
+          text: `Partially completed: ${totalApproved} approved${duplicateNote}, ${totalErrors} failed. ${errors.slice(0, 2).join('; ')}` 
+        });
+        setBulkStatusModal({
+          isOpen: true,
+          title: 'Bulk approve completed with issues',
+          message: `Approved ${totalApproved}${duplicateNote}.`,
+          details: `${totalErrors} failed. You can close this window now.`,
+          isComplete: true
+        });
+      } else if (totalDuplicates > 0 && totalErrors === 0) {
+        setReviewMessage({ 
+          type: 'info', 
+          text: `No new approvals. ${totalDuplicates} duplicate${totalDuplicates === 1 ? '' : 's'} marked.` 
+        });
+        setBulkStatusModal({
+          isOpen: true,
+          title: 'Bulk approve complete',
+          message: `No new approvals. ${totalDuplicates} duplicate${totalDuplicates === 1 ? '' : 's'} marked.`,
+          details: 'You can close this window now.',
+          isComplete: true
         });
       } else {
         throw new Error(`Failed to approve any restaurants. ${errors.join('; ')}`);
@@ -1303,6 +1444,13 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       setReviewMessage({ 
         type: 'error', 
         text: `${errorMessage}. Please try again or select fewer restaurants.` 
+      });
+      setBulkStatusModal({
+        isOpen: true,
+        title: 'Bulk approve failed',
+        message: errorMessage,
+        details: 'Please try again or select fewer restaurants.',
+        isComplete: true
       });
       setTimeout(() => setReviewMessage(null), 6000);
     } finally {
@@ -1369,9 +1517,9 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       restaurants = restaurants.filter(r => r.rating > 0);
     }
     
-    // Apply no-full-address filter THIRD (before search)
-    if (filterOutNoFullAddress) {
-      restaurants = restaurants.filter(r => r.location?.address1 && r.location.address1.trim() !== '');
+    // Apply hide-reviewed filter THIRD (before search)
+    if (hideReviewed) {
+      restaurants = restaurants.filter(r => getEffectiveStatus(r.id) === 'new');
     }
     
     // Apply cached filter FOURTH (before search)
@@ -1425,7 +1573,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     });
     
     return sorted;
-  }, [restaurantSearch, restaurantSortOrder, restaurantSortType, restaurantStatusFilter, yelpResults, filterOutFranchises, filterOutZeroRating, filterOutNoFullAddress, filterOutCached, restaurantToHexagonMap, baseRestaurants, getEffectiveStatus]);
+  }, [restaurantSearch, restaurantSortOrder, restaurantSortType, restaurantStatusFilter, yelpResults, filterOutFranchises, filterOutZeroRating, hideReviewed, filterOutCached, restaurantToHexagonMap, baseRestaurants, getEffectiveStatus]);
 
   const hiddenProcessedRestaurants = useMemo(() => {
     if (!hiddenRestaurantView) {
@@ -1442,8 +1590,8 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       restaurants = restaurants.filter(r => r.rating === 0);
     }
     
-    if (hiddenRestaurantView === 'noFullAddress') {
-      restaurants = restaurants.filter(r => !r.location?.address1 || r.location.address1.trim() === '');
+    if (hiddenRestaurantView === 'reviewed') {
+      restaurants = restaurants.filter(r => getEffectiveStatus(r.id) !== 'new');
     }
     
     // Apply status filter BEFORE search
@@ -1506,7 +1654,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     const hasSearchOrFilter = restaurantSearch.length > 0 ||
       filterOutFranchises ||
       filterOutZeroRating ||
-      filterOutNoFullAddress ||
+      hideReviewed ||
       filterOutCached ||
       restaurantStatusFilter !== 'all';
     
@@ -1517,7 +1665,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       hasSearchOrFilter,
       hasHiddenSelections: totalSelected > visibleSelected && hasSearchOrFilter
     };
-  }, [selectedRestaurantIds, processedRestaurants, restaurantSearch, filterOutFranchises, filterOutZeroRating, filterOutNoFullAddress, filterOutCached, restaurantStatusFilter]);
+  }, [selectedRestaurantIds, processedRestaurants, restaurantSearch, filterOutFranchises, filterOutZeroRating, hideReviewed, filterOutCached, restaurantStatusFilter]);
 
   // Select all restaurants on current page (must be after paginatedRestaurants is defined)
   const selectAllOnPage = () => {
@@ -1615,20 +1763,21 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
     setRestaurantPage(1);
   }, [restaurantSearch, restaurantSortOrder, restaurantSortType]);
 
-  // Close dropdown when clicking outside
+  // Close dropdowns when clicking outside
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      if (!target.closest('[data-filter-dropdown]')) {
+      if (!target.closest('[data-filter-dropdown]') && !target.closest('[data-filters-dropdown]')) {
+        setShowFiltersDropdown(false);
         setShowFilterDropdown(false);
       }
     };
     
-    if (showFilterDropdown) {
+    if (showFilterDropdown || showFiltersDropdown) {
       document.addEventListener('click', handleClickOutside);
       return () => document.removeEventListener('click', handleClickOutside);
     }
-  }, [showFilterDropdown]);
+  }, [showFilterDropdown, showFiltersDropdown]);
 
   // Phase 4: Keyboard shortcuts
   useEffect(() => {
@@ -1758,6 +1907,13 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
       }
 
       setImportLogs(prev => prev.filter(log => log.id !== logId));
+      setBulkStatusModal({
+        isOpen: true,
+        title: 'Import log deleted',
+        message: `Deleted ${data?.deletedRestaurantsCount || 0} restaurant${data?.deletedRestaurantsCount === 1 ? '' : 's'}.`,
+        details: `Staging rows removed: ${data?.deletedStagingCount || 0}. Hextiles affected: ${data?.affectedHextiles || 0}.`,
+        isComplete: true
+      });
     } catch (error) {
       console.error('Failed to delete import log:', error);
       setImportMessage({
@@ -1870,6 +2026,41 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                   {isBulkUpdating ? 'Processing...' : 'Confirm Reject (Enter)'}
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Bulk Operation Status Modal */}
+        {bulkStatusModal.isOpen && (
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm" style={{ zIndex: 9999 }}>
+            <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-md w-full mx-4 border border-blue-200" style={{ zIndex: 10000 }}>
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">{bulkStatusModal.title}</h3>
+                  <p className="text-sm text-gray-600 mt-1">{bulkStatusModal.message}</p>
+                  {bulkStatusModal.details && (
+                    <p className="text-xs text-gray-500 mt-2">{bulkStatusModal.details}</p>
+                  )}
+                </div>
+                <button
+                  onClick={() => setBulkStatusModal(prev => ({ ...prev, isOpen: false }))}
+                  disabled={!bulkStatusModal.isComplete}
+                  className="text-gray-400 hover:text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed"
+                  aria-label="Close status window"
+                >
+                  ✕
+                </button>
+              </div>
+              {!bulkStatusModal.isComplete && (
+                <div className="mt-4">
+                  <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                    <div className="h-2 bg-gradient-to-r from-blue-500 to-indigo-600 animate-pulse"></div>
+                  </div>
+                  <div className="mt-2 text-xs text-gray-500">
+                    Processing… this will update when complete.
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -2354,22 +2545,22 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                 </div>
 
                 {/* Filter Statistics Banner - Shows when filters are active */}
-                {(filterOutFranchises || filterOutZeroRating || filterOutNoFullAddress || filterOutCached) && (() => {
+                {(filterOutFranchises || filterOutZeroRating || hideReviewed || filterOutCached) && (() => {
                   const stats = getFilterStats();
                   const filteredOutCount = stats.total - visibleProcessedRestaurants.length;
                   const hiddenViewLabel = hiddenRestaurantView === 'franchises'
                     ? 'Chains'
                     : hiddenRestaurantView === 'zeroRating'
                       ? '0★'
-                      : hiddenRestaurantView === 'noFullAddress'
-                        ? 'No Address'
+                      : hiddenRestaurantView === 'reviewed'
+                        ? 'Reviewed'
                         : '';
                   const hiddenViewCount = hiddenRestaurantView === 'franchises'
                     ? stats.franchises
                     : hiddenRestaurantView === 'zeroRating'
                       ? stats.zeroRating
-                      : hiddenRestaurantView === 'noFullAddress'
-                        ? stats.noFullAddress
+                      : hiddenRestaurantView === 'reviewed'
+                        ? stats.reviewed
                         : 0;
                   
                   return (
@@ -2431,21 +2622,21 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                               ⭐ {stats.zeroRating} unrated
                             </button>
                           )}
-                          {filterOutNoFullAddress && (
+                          {hideReviewed && (
                             <button
                               type="button"
                               onClick={() => {
-                                setHiddenRestaurantView(prev => prev === 'noFullAddress' ? null : 'noFullAddress');
+                                setHiddenRestaurantView(prev => prev === 'reviewed' ? null : 'reviewed');
                                 setRestaurantPage(1);
                               }}
-                              aria-pressed={hiddenRestaurantView === 'noFullAddress'}
+                              aria-pressed={hiddenRestaurantView === 'reviewed'}
                               className={`px-2 py-1 rounded-full font-semibold transition-colors ${
-                                hiddenRestaurantView === 'noFullAddress'
+                                hiddenRestaurantView === 'reviewed'
                                   ? 'bg-blue-200 text-blue-800 ring-1 ring-blue-300'
                                   : 'bg-blue-100 text-blue-700 hover:bg-blue-200'
                               }`}
                             >
-                              📍 {stats.noFullAddress} no address
+                              👀 {stats.reviewed} reviewed
                             </button>
                           )}
                           {filterOutCached && (
@@ -2481,111 +2672,110 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                     
                     {/* Filter & Sort Buttons Group */}
                     <div className="flex gap-2">
-                      {/* Franchise Filter Button */}
-                      <button
-                        onClick={() => {
-                          setFilterOutFranchises(!filterOutFranchises);
-                          setRestaurantPage(1); // Reset pagination
-                        }}
-                        className={`px-3 py-2 font-bold rounded-lg focus:ring-2 transition-all duration-200 shadow-sm hover:shadow-md transform hover:scale-[1.02] active:scale-95 flex items-center justify-center gap-1.5 whitespace-nowrap text-xs ${
-                          filterOutFranchises 
-                            ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white hover:from-orange-600 hover:to-red-600 focus:ring-orange-300'
-                            : 'bg-white text-gray-700 border border-gray-300 hover:border-orange-400 hover:bg-orange-50 focus:ring-orange-200'
-                        }`}
-                        title={filterOutFranchises ? 'Show chain restaurants' : 'Hide chain restaurants (McDonald\'s, Subway, etc.)'}
-                      >
-                        <span>🚫</span>
-                        <span className="hidden sm:inline">
-                          {filterOutFranchises ? 'Chains Off' : 'Hide Chains'}
-                        </span>
-                      </button>
-                      
-                      {/* Zero Rating Filter Button */}
-                      <button
-                        onClick={() => {
-                          setFilterOutZeroRating(!filterOutZeroRating);
-                          setRestaurantPage(1); // Reset pagination
-                        }}
-                        className={`px-3 py-2 font-bold rounded-lg focus:ring-2 transition-all duration-200 shadow-sm hover:shadow-md transform hover:scale-[1.02] active:scale-95 flex items-center justify-center gap-1.5 whitespace-nowrap text-xs ${
-                          filterOutZeroRating 
-                            ? 'bg-gradient-to-r from-yellow-500 to-amber-500 text-white hover:from-yellow-600 hover:to-amber-600 focus:ring-yellow-300'
-                            : 'bg-white text-gray-700 border border-gray-300 hover:border-yellow-400 hover:bg-yellow-50 focus:ring-yellow-200'
-                        }`}
-                        title={filterOutZeroRating ? 'Show unrated restaurants' : 'Hide unrated restaurants (0 stars)'}
-                      >
-                        <span>⭐</span>
-                        <span className="hidden sm:inline">
-                          {filterOutZeroRating ? '0★ Off' : 'Hide 0★'}
-                        </span>
-                      </button>
-                      
-                      {/* No Full Address Filter Button */}
-                      <button
-                        onClick={() => {
-                          setFilterOutNoFullAddress(!filterOutNoFullAddress);
-                          setRestaurantPage(1); // Reset pagination
-                        }}
-                        className={`px-3 py-2 font-bold rounded-lg focus:ring-2 transition-all duration-200 shadow-sm hover:shadow-md transform hover:scale-[1.02] active:scale-95 flex items-center justify-center gap-1.5 whitespace-nowrap text-xs ${
-                          filterOutNoFullAddress 
-                            ? 'bg-gradient-to-r from-blue-500 to-cyan-500 text-white hover:from-blue-600 hover:to-cyan-600 focus:ring-blue-300'
-                            : 'bg-white text-gray-700 border border-gray-300 hover:border-blue-400 hover:bg-blue-50 focus:ring-blue-200'
-                        }`}
-                        title={filterOutNoFullAddress ? 'Show restaurants without full address' : 'Hide restaurants without full address'}
-                      >
-                        <span>📍</span>
-                        <span className="hidden sm:inline">
-                          {filterOutNoFullAddress ? 'Addr Off' : 'No Address'}
-                        </span>
-                      </button>
-                      
-                      {/* Cached Filter Button */}
-                      <button
-                        onClick={() => {
-                          setFilterOutCached(!filterOutCached);
-                          setRestaurantPage(1); // Reset pagination
-                        }}
-                        disabled={!yelpResults?.results?.some(r => r.coverageQuality === 'cached')}
-                        className={`px-3 py-2 font-bold rounded-lg focus:ring-2 transition-all duration-200 shadow-sm hover:shadow-md transform hover:scale-[1.02] active:scale-95 flex items-center justify-center gap-1.5 whitespace-nowrap text-xs ${
-                          filterOutCached 
-                            ? 'bg-gradient-to-r from-purple-500 to-indigo-500 text-white hover:from-purple-600 hover:to-indigo-600 focus:ring-purple-300'
-                            : yelpResults?.results?.some(r => r.coverageQuality === 'cached')
-                              ? 'bg-white text-gray-700 border border-gray-300 hover:border-purple-400 hover:bg-purple-50 focus:ring-purple-200'
-                              : 'bg-gray-100 text-gray-400 border border-gray-200 cursor-not-allowed opacity-50'
-                        }`}
-                        title={yelpResults?.results?.some(r => r.coverageQuality === 'cached') ? (filterOutCached ? 'Show cached restaurants' : 'Hide cached restaurants') : 'No cached restaurants available'}
-                      >
-                        <span>💾</span>
-                        <span className="hidden sm:inline">
-                          {filterOutCached ? 'Cached Off' : 'Hide Cached'}
-                        </span>
-                      </button>
-                      
-                      {/* Rejected Status Filter Button */}
-                      <button
-                        onClick={() => {
-                          setRestaurantStatusFilter(restaurantStatusFilter === 'rejected' ? 'all' : 'rejected');
-                          setRestaurantPage(1); // Reset pagination
-                        }}
-                        className={`px-3 py-2 font-bold rounded-lg focus:ring-2 transition-all duration-200 shadow-sm hover:shadow-md transform hover:scale-[1.02] active:scale-95 flex items-center justify-center gap-1.5 whitespace-nowrap text-xs ${
-                          restaurantStatusFilter === 'rejected'
-                            ? 'bg-gradient-to-r from-red-500 to-rose-600 text-white hover:from-red-600 hover:to-rose-700 focus:ring-red-300'
-                            : 'bg-white text-gray-700 border border-gray-300 hover:border-red-400 hover:bg-red-50 focus:ring-red-200'
-                        }`}
-                        title={restaurantStatusFilter === 'rejected' ? 'Show all statuses' : 'Show rejected restaurants'}
-                      >
-                        <span>✗</span>
-                        <span className="hidden sm:inline">
-                          {restaurantStatusFilter === 'rejected' ? 'Rejected On' : 'Rejected'}
-                        </span>
-                      </button>
-                      
-                      {/* Filter Button with Dropdown */}
+                      {/* Filters Dropdown */}
+                      <div className="relative" data-filters-dropdown>
+                        <button
+                          onClick={() => setShowFiltersDropdown(!showFiltersDropdown)}
+                          className="px-4 py-2 bg-gradient-to-r from-blue-500 to-cyan-500 text-white font-bold rounded-lg hover:from-blue-600 hover:to-cyan-600 focus:ring-2 focus:ring-blue-300 transition-all duration-200 shadow-sm hover:shadow-md transform hover:scale-[1.01] active:scale-95 flex items-center justify-center gap-1.5 whitespace-nowrap text-sm"
+                        >
+                          <span>Filters</span>
+                          <span className="text-xs">{showFiltersDropdown ? '▲' : '▼'}</span>
+                        </button>
+                        
+                        {showFiltersDropdown && (
+                          <div className="absolute right-0 top-full mt-1 bg-white rounded-lg shadow-xl border-2 border-blue-200 z-50 min-w-[220px] max-h-[360px] overflow-y-auto">
+                            <div className="p-2">
+                              <div className="text-xs font-bold text-gray-600 px-2 py-1 uppercase">Filters</div>
+                              <div className="space-y-1">
+                                <button
+                                  onClick={() => {
+                                    setFilterOutFranchises(!filterOutFranchises);
+                                    setRestaurantPage(1);
+                                    setShowFiltersDropdown(false);
+                                  }}
+                                  className="w-full text-left px-2 py-1 rounded-md text-sm hover:bg-orange-50 flex items-center justify-between"
+                                >
+                                  <span>🚫 Hide chains</span>
+                                  <span className="flex items-center gap-2">
+                                    <span className="text-xs text-gray-500">{filterStats.franchises}</span>
+                                    <span className={filterOutFranchises ? 'text-orange-600 font-bold' : 'text-gray-300'}>✓</span>
+                                  </span>
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setFilterOutZeroRating(!filterOutZeroRating);
+                                    setRestaurantPage(1);
+                                    setShowFiltersDropdown(false);
+                                  }}
+                                  className="w-full text-left px-2 py-1 rounded-md text-sm hover:bg-yellow-50 flex items-center justify-between"
+                                >
+                                  <span>⭐ Hide 0★</span>
+                                  <span className="flex items-center gap-2">
+                                    <span className="text-xs text-gray-500">{filterStats.zeroRating}</span>
+                                    <span className={filterOutZeroRating ? 'text-yellow-600 font-bold' : 'text-gray-300'}>✓</span>
+                                  </span>
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setHideReviewed(!hideReviewed);
+                                    setRestaurantPage(1);
+                                    setShowFiltersDropdown(false);
+                                  }}
+                                  className="w-full text-left px-2 py-1 rounded-md text-sm hover:bg-blue-50 flex items-center justify-between"
+                                >
+                                  <span>👀 Hide reviewed</span>
+                                  <span className="flex items-center gap-2">
+                                    <span className="text-xs text-gray-500">{filterStats.reviewed}</span>
+                                    <span className={hideReviewed ? 'text-blue-600 font-bold' : 'text-gray-300'}>✓</span>
+                                  </span>
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    if (!yelpResults?.results?.some(r => r.coverageQuality === 'cached')) return;
+                                    setFilterOutCached(!filterOutCached);
+                                    setRestaurantPage(1);
+                                    setShowFiltersDropdown(false);
+                                  }}
+                                  className={`w-full text-left px-2 py-1 rounded-md text-sm flex items-center justify-between ${
+                                    yelpResults?.results?.some(r => r.coverageQuality === 'cached')
+                                      ? 'hover:bg-purple-50'
+                                      : 'text-gray-300 cursor-not-allowed'
+                                  }`}
+                                  title={yelpResults?.results?.some(r => r.coverageQuality === 'cached') ? undefined : 'No cached restaurants available'}
+                                >
+                                  <span>💾 Hide cached</span>
+                                  <span className="flex items-center gap-2">
+                                    <span className="text-xs text-gray-500">{filterStats.cached}</span>
+                                    <span className={filterOutCached ? 'text-purple-600 font-bold' : 'text-gray-300'}>✓</span>
+                                  </span>
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setRestaurantStatusFilter(restaurantStatusFilter === 'rejected' ? 'all' : 'rejected');
+                                    setRestaurantPage(1);
+                                    setShowFiltersDropdown(false);
+                                  }}
+                                  className="w-full text-left px-2 py-1 rounded-md text-sm hover:bg-red-50 flex items-center justify-between"
+                                >
+                                  <span>✗ Rejected only</span>
+                                  <span className="flex items-center gap-2">
+                                    <span className="text-xs text-gray-500">{restaurantStatusStats.rejected}</span>
+                                    <span className={restaurantStatusFilter === 'rejected' ? 'text-red-600 font-bold' : 'text-gray-300'}>✓</span>
+                                  </span>
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Sort/Status Dropdown */}
                       <div className="relative" data-filter-dropdown>
                         <button
                           onClick={() => setShowFilterDropdown(!showFilterDropdown)}
                           className="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white font-bold rounded-lg hover:from-purple-600 hover:to-pink-600 focus:ring-2 focus:ring-purple-300 transition-all duration-200 shadow-sm hover:shadow-md transform hover:scale-[1.01] active:scale-95 flex items-center justify-center gap-1.5 whitespace-nowrap text-sm"
                         >
-                          <span>Filter</span>
+                          <span>Sort</span>
                           <span className="text-xs">{showFilterDropdown ? '▲' : '▼'}</span>
                         </button>
                         
@@ -2605,6 +2795,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                                     setRestaurantSortOrder('asc');
                                   }
                                   setRestaurantPage(1);
+                                  setShowFilterDropdown(false);
                                 }}
                                 className={`w-full text-left px-3 py-2 rounded-lg text-sm font-semibold transition-all flex items-center justify-between ${
                                   restaurantSortType === 'alphabetical'
@@ -2630,6 +2821,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                                     setRestaurantSortOrder('desc'); // Default to high to low
                                   }
                                   setRestaurantPage(1);
+                                  setShowFilterDropdown(false);
                                 }}
                                 className={`w-full text-left px-3 py-2 rounded-lg text-sm font-semibold transition-all flex items-center justify-between mt-1 ${
                                   restaurantSortType === 'rating'
@@ -2652,6 +2844,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                                 onClick={() => {
                                   setRestaurantStatusFilter('new');
                                   setRestaurantPage(1);
+                                  setShowFilterDropdown(false);
                                 }}
                                 className={`w-full text-left px-3 py-2 rounded-lg text-sm font-semibold transition-all flex items-center justify-between ${
                                   restaurantStatusFilter === 'new'
@@ -2669,6 +2862,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                                 onClick={() => {
                                   setRestaurantStatusFilter('approved');
                                   setRestaurantPage(1);
+                                  setShowFilterDropdown(false);
                                 }}
                                 className={`w-full text-left px-3 py-2 rounded-lg text-sm font-semibold transition-all flex items-center justify-between mt-1 ${
                                   restaurantStatusFilter === 'approved'
@@ -2686,6 +2880,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                                 onClick={() => {
                                   setRestaurantStatusFilter('rejected');
                                   setRestaurantPage(1);
+                                  setShowFilterDropdown(false);
                                 }}
                                 className={`w-full text-left px-3 py-2 rounded-lg text-sm font-semibold transition-all flex items-center justify-between mt-1 ${
                                   restaurantStatusFilter === 'rejected'
@@ -2703,6 +2898,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                                 onClick={() => {
                                   setRestaurantStatusFilter('all');
                                   setRestaurantPage(1);
+                                  setShowFilterDropdown(false);
                                 }}
                                 className={`w-full text-left px-3 py-2 rounded-lg text-sm font-semibold transition-all flex items-center justify-between mt-1 ${
                                   restaurantStatusFilter === 'all'
@@ -2919,30 +3115,20 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
                               <span>💾</span> Cached
                             </span>
                           )}
-                          {effectiveStatus === 'new' && (
-                            <span className="bg-yellow-100 text-yellow-800 text-[10px] font-bold px-2 py-0.5 rounded-full shadow-sm flex items-center gap-0.5">
-                              <span className="text-xs">•</span> New
-                            </span>
-                          )}
-                          {effectiveStatus === 'approved' && (
-                            <span className="bg-gradient-to-r from-green-500 to-emerald-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-sm flex items-center gap-0.5">
-                              <span className="text-xs">✓</span> Approved
-                            </span>
-                          )}
-                          {effectiveStatus === 'rejected' && (
-                            <span className="bg-gradient-to-r from-red-500 to-rose-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-sm flex items-center gap-0.5">
-                              <span className="text-xs">✗</span> Rejected
-                            </span>
-                          )}
-                          <div className="flex items-center gap-0.5 bg-yellow-100 px-2 py-0.5 rounded-full">
-                            <span className="text-yellow-600 text-sm">⭐</span>
-                            <span className="text-yellow-700 font-bold text-xs">{restaurant.rating}</span>
-                          </div>
                           {restaurant.price && (
                             <span className="bg-gradient-to-r from-green-400 to-emerald-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-sm">
                               {restaurant.price}
                             </span>
                           )}
+                          <div className="flex items-center gap-1 bg-yellow-100 px-2 py-0.5 rounded-full">
+                            <span className="text-yellow-600 text-sm">⭐</span>
+                            <span className="text-yellow-700 font-bold text-xs">
+                              {restaurant.rating}
+                            </span>
+                            <span className="text-yellow-700 text-[10px]">
+                              · {restaurant.review_count} reviews
+                            </span>
+                          </div>
                         </div>
                         {/* Info Row 1: Category, Location, Phone */}
                         <div className="flex items-center flex-wrap gap-1.5 text-xs mb-1">

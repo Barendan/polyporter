@@ -420,9 +420,162 @@ async function handleBulkUpdateStatus(body: any): Promise<NextResponse> {
       );
     }
 
-    // Perform bulk update
+    const trimmedIds = yelpIds.map((id: string) => id.trim());
+    const uniqueIds = Array.from(new Set(trimmedIds));
+
+    if (status === 'approved') {
+      const adminUserId = process.env.ADMIN_USER_ID;
+      if (!adminUserId) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: 'Missing ADMIN_USER_ID in server environment'
+          },
+          { status: 500 }
+        );
+      }
+
+      const results = await Promise.all(
+        uniqueIds.map(async (id) => {
+          try {
+            const { data, error } = await supabaseServer.rpc('approve_staging_restaurant', {
+              p_staging_id: id,
+              p_admin_user_id: adminUserId
+            });
+
+            if (error) {
+              return { id, success: false, error: error.message };
+            }
+
+            if (!data?.success) {
+              return { id, success: false, error: data?.error || 'Unknown error' };
+            }
+
+            return {
+              id,
+              success: true,
+              isDuplicate: data?.isDuplicate === true
+            };
+          } catch (rpcError) {
+            return {
+              id,
+              success: false,
+              error: rpcError instanceof Error ? rpcError.message : 'Unknown error'
+            };
+          }
+        })
+      );
+
+      const approvedIds = results.filter(r => r.success && !r.isDuplicate).map(r => r.id);
+      const duplicateIds = results.filter(r => r.success && r.isDuplicate).map(r => r.id);
+      const failedIds = results.filter(r => !r.success).map(r => r.id);
+
+      const successCount = approvedIds.length + duplicateIds.length;
+      const failedCount = failedIds.length;
+
+      if (successCount > 0) {
+        // Update hex tile staged count - recalculate from database to ensure accuracy
+        try {
+          const { data: stagingRecord } = await supabaseServer
+            .from('yelp_staging')
+            .select('h3_id')
+            .eq('id', uniqueIds[0])
+            .single();
+
+          if (stagingRecord?.h3_id) {
+            await updateHextileStagedCount(stagingRecord.h3_id);
+          }
+        } catch (logError) {
+          console.warn('⚠️ Failed to update hex tile staged count (non-fatal):', logError);
+        }
+
+        return NextResponse.json({
+          success: true,
+          message: `Processed ${successCount} restaurant${successCount === 1 ? '' : 's'} for approval${failedCount > 0 ? ` (${failedCount} failed)` : ''}`,
+          successCount,
+          failedCount,
+          failedIds,
+          approvedIds,
+          duplicateIds
+        });
+      }
+
+      return NextResponse.json(
+        {
+          success: false,
+          message: `Failed to approve any restaurants. All ${failedCount} restaurant${failedCount === 1 ? '' : 's'} may not exist in database.`,
+          successCount: 0,
+          failedCount,
+          failedIds,
+          approvedIds: [],
+          duplicateIds: []
+        },
+        { status: 404 }
+      );
+    }
+
+    if (status === 'rejected') {
+      const results = await Promise.all(
+        uniqueIds.map(async (id) => {
+          try {
+            const { data, error } = await supabaseServer.rpc('reject_staging_restaurant', {
+              p_staging_id: id
+            });
+
+            if (error) {
+              return { id, success: false, error: error.message };
+            }
+
+            if (!data?.success) {
+              return { id, success: false, error: data?.error || 'Unknown error' };
+            }
+
+            return {
+              id,
+              success: true,
+              alreadyRejected: data?.alreadyRejected === true
+            };
+          } catch (rpcError) {
+            return {
+              id,
+              success: false,
+              error: rpcError instanceof Error ? rpcError.message : 'Unknown error'
+            };
+          }
+        })
+      );
+
+      const successIds = results.filter(r => r.success).map(r => r.id);
+      const failedIds = results.filter(r => !r.success).map(r => r.id);
+
+      const successCount = successIds.length;
+      const failedCount = failedIds.length;
+
+      if (successCount > 0) {
+        return NextResponse.json({
+          success: true,
+          message: `Successfully rejected ${successCount} restaurant${successCount === 1 ? '' : 's'}${failedCount > 0 ? ` (${failedCount} failed)` : ''}`,
+          successCount,
+          failedCount,
+          failedIds
+        });
+      }
+
+      return NextResponse.json(
+        {
+          success: false,
+          message: `Failed to reject any restaurants. All ${failedCount} restaurant${failedCount === 1 ? '' : 's'} may not exist in database.`,
+          successCount: 0,
+          failedCount,
+          failedIds
+        },
+        { status: 404 }
+      );
+    }
+
+    // Perform bulk update (fallback - should not hit)
     const result = await bulkUpdateStagingStatus(
-      yelpIds.map((id: string) => id.trim()),
+      uniqueIds,
       status as YelpStagingStatus
     );
 
@@ -774,7 +927,87 @@ async function handleUpdateStatus(body: any): Promise<NextResponse> {
       );
     }
 
-    // Update the status
+    if (status === 'approved') {
+      const adminUserId = process.env.ADMIN_USER_ID;
+      if (!adminUserId) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: 'Missing ADMIN_USER_ID in server environment'
+          },
+          { status: 500 }
+        );
+      }
+
+      const { data, error } = await supabaseServer.rpc('approve_staging_restaurant', {
+        p_staging_id: yelpId.trim(),
+        p_admin_user_id: adminUserId
+      });
+
+      if (error) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: error.message
+          },
+          { status: 500 }
+        );
+      }
+
+      if (!data?.success) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: data?.error || 'Failed to approve restaurant'
+          },
+          { status: 500 }
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: data?.isDuplicate ? 'Restaurant already exists; marked as duplicate' : 'Restaurant approved and saved',
+        yelpId: yelpId.trim(),
+        isDuplicate: data?.isDuplicate === true,
+        existingId: data?.existingId,
+        newRestaurant: data?.newRestaurant
+      });
+    }
+
+    if (status === 'rejected') {
+      const { data, error } = await supabaseServer.rpc('reject_staging_restaurant', {
+        p_staging_id: yelpId.trim()
+      });
+
+      if (error) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: error.message
+          },
+          { status: 500 }
+        );
+      }
+
+      if (!data?.success) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: data?.error || 'Failed to reject restaurant'
+          },
+          { status: 500 }
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: data?.alreadyRejected ? 'Restaurant already rejected' : 'Restaurant rejected',
+        yelpId: yelpId.trim(),
+        alreadyRejected: data?.alreadyRejected === true
+      });
+    }
+
+    // Update the status (fallback - should not hit)
     const success = await updateStagingStatus(yelpId.trim(), status as YelpStagingStatus);
 
     if (success) {
