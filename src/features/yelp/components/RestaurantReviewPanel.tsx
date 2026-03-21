@@ -718,34 +718,99 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
    * Batch save all restaurants from state to DB
    * Called on first approve/reject action
    */
-  const batchSaveAllToDb = useCallback(async (): Promise<boolean> => {
+  const batchSaveAllToDb = useCallback(async (): Promise<{
+    ok: boolean;
+    stagedIds: string[];
+    missingIds: string[];
+    reason?: string;
+  }> => {
     if (isPersistedToDb) {
       console.log('Restaurants already persisted to DB, skipping batch save');
-      return true; // Already saved
+      return {
+        ok: true,
+        stagedIds: allRestaurants.map((restaurant) => restaurant.id),
+        missingIds: []
+      };
     }
-    
-    if (yelpResults?.fromCache) {
-      console.log('Cached results detected; restaurants already in staging DB, skipping batch save');
-      setIsPersistedToDb(true);
-      return true;
-    }
-    
+
     if (!yelpResults?.importLogId || !yelpResults?.cityId) {
       console.error('Missing import log ID or city ID for batch save');
-      return false;
+      return {
+        ok: false,
+        stagedIds: [],
+        missingIds: allRestaurants.map((restaurant) => restaurant.id),
+        reason: 'Missing import log ID or city ID for batch save'
+      };
     }
-    
+
     if (allRestaurants.length === 0) {
       console.log('No restaurants to save');
-      return true;
+      return { ok: true, stagedIds: [], missingIds: [] };
     }
-    
-    console.log(`💾 Batch saving ${allRestaurants.length} restaurants to staging DB...`);
-    
+
+    const verifyStagedRows = async (ids: string[]): Promise<{ ok: boolean; missingIds: Set<string> }> => {
+      try {
+        const response = await fetch('/api/yelp/staging', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'get-statuses',
+            yelpIds: ids
+          })
+        });
+
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+          console.error('Failed to verify staging statuses:', data?.message || 'Unknown error');
+          return { ok: false, missingIds: new Set(ids) };
+        }
+
+        const foundIds = new Set<string>(
+          Array.isArray(data.statuses) ? data.statuses.map((row: { id: string }) => row.id) : []
+        );
+        const missingIds = new Set(ids.filter((id) => !foundIds.has(id)));
+        return { ok: true, missingIds };
+      } catch (error) {
+        console.error('Exception verifying staging statuses:', error);
+        return { ok: false, missingIds: new Set(ids) };
+      }
+    };
+
+    let restaurantsToPersist = allRestaurants;
+    const allRestaurantIds = allRestaurants.map((restaurant) => restaurant.id);
+
+    if (yelpResults.fromCache) {
+      console.log('Cached results detected; verifying staged rows before bulk approve/reject');
+      const cachedVerification = await verifyStagedRows(allRestaurantIds);
+      if (!cachedVerification.ok) {
+        return {
+          ok: false,
+          stagedIds: [],
+          missingIds: allRestaurantIds,
+          reason: 'Failed to verify cached staging rows'
+        };
+      }
+
+      if (cachedVerification.missingIds.size === 0) {
+        console.log('All cached restaurants already exist in staging DB');
+        setIsPersistedToDb(true);
+        return {
+          ok: true,
+          stagedIds: allRestaurantIds,
+          missingIds: []
+        };
+      }
+
+      restaurantsToPersist = allRestaurants.filter((restaurant) => cachedVerification.missingIds.has(restaurant.id));
+      console.warn(`Cached results missing ${restaurantsToPersist.length} staged rows; creating missing records now`);
+    }
+
+    console.log(`Batch saving ${restaurantsToPersist.length} restaurants to staging DB...`);
+
     // Group by hexagon
     const restaurantsByHexagon = new Map<string, Restaurant[]>();
     let missingHexCount = 0;
-    allRestaurants.forEach(restaurant => {
+    restaurantsToPersist.forEach(restaurant => {
       const h3Id = restaurantToHexagonMap.get(restaurant.id);
       if (h3Id) {
         if (!restaurantsByHexagon.has(h3Id)) {
@@ -757,20 +822,26 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         console.warn(`Restaurant ${restaurant.id} (${restaurant.name}) has no hexagon assignment, skipping`);
       }
     });
-    
+
     if (restaurantsByHexagon.size === 0) {
-      console.error('❌ No restaurants have hexagon assignments; cannot persist to DB.');
+      console.error('No restaurants have hexagon assignments; cannot persist to DB.');
       if (missingHexCount > 0) {
-        console.error(`❌ ${missingHexCount} restaurants missing hexagon assignments.`);
+        console.error(`${missingHexCount} restaurants missing hexagon assignments.`);
       }
-      return false;
+      return {
+        ok: false,
+        stagedIds: [],
+        missingIds: restaurantsToPersist.map((restaurant) => restaurant.id),
+        reason: 'No restaurants have hexagon assignments; cannot persist to DB'
+      };
     }
-    
+
     // Save each hexagon group
     let totalSaved = 0;
     let totalErrors = 0;
     let anySuccess = false;
-    
+    let firstInsertErrorSummary: string | null = null;
+
     for (const [h3Id, restaurants] of restaurantsByHexagon.entries()) {
       try {
         const response = await fetch('/api/yelp/staging', {
@@ -784,34 +855,86 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
             importLogId: yelpResults.importLogId,
           }),
         });
-        
+
         const data = await response.json();
-        
+        const firstInsertError = Array.isArray(data?.insertErrors) ? data.insertErrors[0] : null;
+        const insertErrorSummary = firstInsertError
+          ? `[${firstInsertError.code || 'unknown'}] ${firstInsertError.message || 'insert failure'}`
+          : null;
+
         if (data.success) {
           anySuccess = true;
           totalSaved += data.createdCount || 0;
         } else {
           totalErrors += restaurants.length;
           console.error(`Failed to save hexagon ${h3Id}:`, data.message);
+          if (Array.isArray(data?.insertErrors) && data.insertErrors.length > 0) {
+            console.error(`Detailed insert errors for hexagon ${h3Id}:`, data.insertErrors);
+          }
+          if (!firstInsertErrorSummary && insertErrorSummary) {
+            firstInsertErrorSummary = insertErrorSummary;
+          }
         }
       } catch (error) {
         console.error(`Error saving hexagon ${h3Id}:`, error);
         totalErrors += restaurants.length;
       }
     }
-    
-    if (anySuccess) {
-      if (totalSaved > 0) {
-        console.log(`✅ Batch saved ${totalSaved} restaurants to DB`);
-      } else {
-        console.log('✅ Batch save succeeded with no new restaurants created (all duplicates or already staged)');
-      }
-      setIsPersistedToDb(true);
-      return true;
+
+    if (!anySuccess && totalErrors > 0) {
+      const reasonSuffix = firstInsertErrorSummary ? ` First insert error: ${firstInsertErrorSummary}` : '';
+      console.error(`Failed to save restaurants to DB (${totalErrors} errors).${reasonSuffix}`);
     }
-    
-    console.error(`❌ Failed to save restaurants to DB (${totalErrors} errors)`);
-    return false;
+
+    if (totalSaved > 0) {
+      console.log(`Batch saved ${totalSaved} restaurants to DB`);
+    } else {
+      console.log('Batch save succeeded with no new restaurants created (all duplicates or already staged)');
+    }
+
+    const finalVerification = await verifyStagedRows(allRestaurantIds);
+    if (!finalVerification.ok) {
+      return {
+        ok: false,
+        stagedIds: [],
+        missingIds: allRestaurantIds,
+        reason: firstInsertErrorSummary
+          ? `Staging verification request failed. First insert error: ${firstInsertErrorSummary}`
+          : 'Staging verification request failed'
+      };
+    }
+
+    const missingIds = Array.from(finalVerification.missingIds);
+    const missingSet = finalVerification.missingIds;
+    const stagedIds = allRestaurantIds.filter((id) => !missingSet.has(id));
+
+    if (finalVerification.missingIds.size > 0) {
+      const reasonSuffix = firstInsertErrorSummary ? ` First insert error: ${firstInsertErrorSummary}` : '';
+      console.error(`Staging verification failed after batch save; ${finalVerification.missingIds.size} restaurants still missing.${reasonSuffix}`);
+      if (firstInsertErrorSummary || stagedIds.length === 0) {
+        setReviewMessage({
+          type: 'error',
+          text: firstInsertErrorSummary
+            ? `Staging verification failed: ${firstInsertErrorSummary}`
+            : `Staging verification failed: ${finalVerification.missingIds.size} restaurants missing`
+        });
+      }
+      return {
+        ok: stagedIds.length > 0,
+        stagedIds,
+        missingIds,
+        reason: firstInsertErrorSummary
+          ? `Staging verification failed; ${missingIds.length} missing. First insert error: ${firstInsertErrorSummary}`
+          : `Staging verification failed; ${missingIds.length} restaurants are missing`
+      };
+    }
+
+    setIsPersistedToDb(true);
+    return {
+      ok: true,
+      stagedIds,
+      missingIds: []
+    };
   }, [isPersistedToDb, yelpResults, allRestaurants, restaurantToHexagonMap]);
 
   // Helper to trigger file upload when input changes
@@ -839,10 +962,10 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
             text: 'Saving all restaurants to staging database...' 
           });
           
-          const saveSuccess = await batchSaveAllToDb();
+          const saveResult = await batchSaveAllToDb();
           
-          if (!saveSuccess) {
-            throw new Error('Failed to save restaurants to database');
+          if (!saveResult.ok) {
+            throw new Error(saveResult.reason || 'Failed to save restaurants to database');
           }
         }
         
@@ -911,10 +1034,10 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
           text: 'Saving all restaurants to staging database...' 
         });
         
-        const saveSuccess = await batchSaveAllToDb();
+        const saveResult = await batchSaveAllToDb();
         
-        if (!saveSuccess) {
-          throw new Error('Failed to save restaurants to database');
+        if (!saveResult.ok) {
+          throw new Error(saveResult.reason || 'Failed to save restaurants to database');
         }
         
         setReviewMessage({ 
@@ -1097,6 +1220,9 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
           return next;
         });
         
+        let stagedSelectedIds = selectedIds;
+        let missingSelectedIds: string[] = [];
+
         // BATCH SAVE on first approve/reject
         if (!isPersistedToDb) {
           setReviewMessage({ 
@@ -1104,24 +1230,38 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
             text: 'Saving all restaurants to staging database...' 
           });
           
-          const saveSuccess = await batchSaveAllToDb();
-          
-          if (!saveSuccess) {
-            throw new Error('Failed to save restaurants to database');
+          const saveResult = await batchSaveAllToDb();
+          if (!saveResult.ok) {
+            throw new Error(saveResult.reason || 'Failed to save restaurants to database');
+          }
+
+          const stagedIdSet = new Set(saveResult.stagedIds);
+          missingSelectedIds = selectedIds.filter((id) => !stagedIdSet.has(id));
+          stagedSelectedIds = selectedIds.filter((id) => stagedIdSet.has(id));
+
+          if (missingSelectedIds.length > 0) {
+            console.warn(
+              `Bulk reject precheck: ${missingSelectedIds.length} selected restaurants are missing in staging and will be skipped`,
+              missingSelectedIds
+            );
           }
         }
-        
+
         if (!yelpResults?.fromCache && (!yelpResults?.importLogId || !yelpResults?.cityId)) {
           throw new Error('Missing import log ID or city ID. Please run a new search.');
         }
-        
-        // Update status for all selected restaurants (they're already in DB from batch save)
+
+        if (stagedSelectedIds.length === 0) {
+          throw new Error(`No selected restaurants are currently staged. ${missingSelectedIds.length} missing.`);
+        }
+
+        // Update status for staged restaurants only
         const response = await fetch('/api/yelp/staging', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             action: 'bulk-update-status',
-            yelpIds: selectedIds,
+            yelpIds: stagedSelectedIds,
             status: 'rejected'
           })
         });
@@ -1131,22 +1271,25 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         let totalUpdated = 0;
         let totalErrors = 0;
         const errors: string[] = [];
-        let successfulIds = selectedIds;
+        let successfulIds = stagedSelectedIds;
         let failedIds: string[] = [];
-        
+
+        if (missingSelectedIds.length > 0) {
+          failedIds.push(...missingSelectedIds);
+          totalErrors += missingSelectedIds.length;
+          errors.push(`Skipped ${missingSelectedIds.length} restaurant(s) not found in staging`);
+        }
+
         if (response.ok && data.success) {
-          totalUpdated = data.successCount || 0;
-          totalErrors = data.failedCount || 0;
-          
-          if (data.failedIds && data.failedIds.length > 0) {
-            failedIds = data.failedIds;
-            errors.push(`Failed to update ${data.failedIds.length} restaurant(s)`);
+          const apiFailedIds: string[] = Array.isArray(data.failedIds) ? data.failedIds : [];
+          if (apiFailedIds.length > 0) {
+            failedIds.push(...apiFailedIds);
+            errors.push(`Failed to update ${apiFailedIds.length} restaurant(s)`);
           }
-          
-          if (failedIds.length > 0) {
-            const failedSet = new Set(failedIds);
-            successfulIds = selectedIds.filter(id => !failedSet.has(id));
-          }
+          const apiFailedSet = new Set(apiFailedIds);
+          successfulIds = stagedSelectedIds.filter(id => !apiFailedSet.has(id));
+          totalUpdated = successfulIds.length;
+          totalErrors = failedIds.length;
           
           // Update progress
           setBulkProgress({
@@ -1158,7 +1301,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
           totalErrors = selectedIds.length;
           errors.push(`Failed to update restaurant statuses: ${data.message || 'Unknown error'}`);
           successfulIds = [];
-          failedIds = selectedIds;
+          failedIds = Array.from(new Set([...failedIds, ...stagedSelectedIds]));
         }
         
         // Track reviewed restaurants and their status
@@ -1183,8 +1326,9 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         }
         
         // Clear selection and localStorage (keep failed selected)
-        if (failedIds.length > 0) {
-          setSelectedRestaurantIds(new Set(failedIds));
+        const dedupedFailedIds = Array.from(new Set(failedIds));
+        if (dedupedFailedIds.length > 0) {
+          setSelectedRestaurantIds(new Set(dedupedFailedIds));
         } else {
           setSelectedRestaurantIds(new Set());
           if (typeof window !== 'undefined') {
@@ -1197,7 +1341,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         }
         
         // Show success/error message
-        if (totalUpdated > 0 && errors.length === 0) {
+        if (totalUpdated > 0 && totalErrors === 0) {
           setReviewMessage({ 
             type: 'success', 
             text: `Successfully rejected ${totalUpdated} restaurant${totalUpdated === 1 ? '' : 's'}!` 
@@ -1211,14 +1355,14 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
           });
         } else if (totalUpdated > 0) {
           setReviewMessage({ 
-            type: 'error', 
-            text: `Partially completed: ${totalUpdated} rejected, ${totalErrors} failed. ${errors.slice(0, 2).join('; ')}` 
+            type: 'warning', 
+            text: `Partially completed: ${totalUpdated} rejected, ${totalErrors} skipped/failed. ${errors.slice(0, 2).join('; ')}` 
           });
           setBulkStatusModal({
             isOpen: true,
             title: 'Bulk reject completed with issues',
             message: `Rejected ${totalUpdated} restaurant${totalUpdated === 1 ? '' : 's'}.`,
-            details: `${totalErrors} failed. You can close this window now.`,
+            details: `${totalErrors} skipped/failed. ${errors.slice(0, 2).join('; ')}`,
             isComplete: true
           });
         } else {
@@ -1230,6 +1374,7 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
         if (restaurantPage > 1 && processedRestaurants.length <= selectedIds.length) {
           setRestaurantPage(1);
         }
+        
       } catch (error) {
         console.error('Error bulk rejecting restaurants:', error);
         const errorMessage = error instanceof Error ? error.message : 'Failed to bulk reject restaurants';
@@ -1295,10 +1440,10 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
           text: 'Saving all restaurants to staging database...' 
         });
         
-        const saveSuccess = await batchSaveAllToDb();
+        const saveResult = await batchSaveAllToDb();
         
-        if (!saveSuccess) {
-          throw new Error('Failed to save restaurants to database');
+        if (!saveResult.ok) {
+          throw new Error(saveResult.reason || 'Failed to save restaurants to database');
         }
       }
 
@@ -3254,3 +3399,4 @@ export default function RestaurantReviewPanel({ yelpResults, cityName, onCacheRe
   </div>
   );
 }
+

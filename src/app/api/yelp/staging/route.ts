@@ -327,8 +327,11 @@ async function handleBulkCreate(body: any): Promise<NextResponse> {
         createdCount: result.createdCount,
         skippedCount: result.skippedCount,
         errorCount: result.errorCount,
+        validationErrorCount: result.validationErrorCount,
+        insertErrorCount: result.insertErrorCount,
         newBusinesses: result.newBusinesses,
-        duplicates: result.duplicates
+        duplicates: result.duplicates,
+        insertErrors: result.insertErrors
       });
     }
 
@@ -339,19 +342,28 @@ async function handleBulkCreate(body: any): Promise<NextResponse> {
         createdCount: result.createdCount,
         skippedCount: result.skippedCount,
         errorCount: result.errorCount,
+        validationErrorCount: result.validationErrorCount,
+        insertErrorCount: result.insertErrorCount,
         newBusinesses: result.newBusinesses,
-        duplicates: result.duplicates
+        duplicates: result.duplicates,
+        insertErrors: result.insertErrors
       });
     }
+
+    const firstInsertCode = result.insertErrors[0]?.code;
+    const insertSuffix = firstInsertCode ? ` (${firstInsertCode})` : '';
 
     return NextResponse.json(
       {
         success: false,
-        message: `Failed to create any restaurants. ${result.skippedCount} duplicates, ${result.errorCount} validation errors`,
+        message: `Failed to create any restaurants. ${result.skippedCount} duplicates, ${result.validationErrorCount} validation errors, ${result.insertErrorCount} insert error${result.insertErrorCount === 1 ? '' : 's'}${insertSuffix}`,
         createdCount: result.createdCount,
         skippedCount: result.skippedCount,
         errorCount: result.errorCount,
-        duplicates: result.duplicates
+        validationErrorCount: result.validationErrorCount,
+        insertErrorCount: result.insertErrorCount,
+        duplicates: result.duplicates,
+        insertErrors: result.insertErrors
       },
       { status: 400 }
     );
@@ -435,6 +447,21 @@ async function handleBulkUpdateStatus(body: any): Promise<NextResponse> {
         );
       }
 
+      const { data: existingRows, error: existingRowsError } = await supabaseServer
+        .from('yelp_staging')
+        .select('id, name, status, h3_id')
+        .in('id', uniqueIds);
+
+      if (existingRowsError) {
+        console.warn('Bulk approve precheck failed to load staging rows:', existingRowsError.message);
+      }
+
+      const existingById = new Map(
+        (existingRows || []).map((row) => [row.id, row])
+      );
+      const missingBeforeRpc = uniqueIds.filter((id) => !existingById.has(id));
+      const missingBeforeRpcSet = new Set(missingBeforeRpc);
+
       const results = await Promise.all(
         uniqueIds.map(async (id) => {
           try {
@@ -444,22 +471,29 @@ async function handleBulkUpdateStatus(body: any): Promise<NextResponse> {
             });
 
             if (error) {
-              return { id, success: false, error: error.message };
+              return { id, success: false, stage: 'rpc_error', error: error.message };
             }
 
             if (!data?.success) {
-              return { id, success: false, error: data?.error || 'Unknown error' };
+              return {
+                id,
+                success: false,
+                stage: 'rpc_data_failure',
+                error: data?.error || 'Unknown error'
+              };
             }
 
             return {
               id,
               success: true,
+              stage: data?.isDuplicate === true ? 'duplicate' : 'approved',
               isDuplicate: data?.isDuplicate === true
             };
           } catch (rpcError) {
             return {
               id,
               success: false,
+              stage: 'exception',
               error: rpcError instanceof Error ? rpcError.message : 'Unknown error'
             };
           }
@@ -469,9 +503,41 @@ async function handleBulkUpdateStatus(body: any): Promise<NextResponse> {
       const approvedIds = results.filter(r => r.success && !r.isDuplicate).map(r => r.id);
       const duplicateIds = results.filter(r => r.success && r.isDuplicate).map(r => r.id);
       const failedIds = results.filter(r => !r.success).map(r => r.id);
+      const failedDetails = results
+        .filter(r => !r.success)
+        .map((r) => {
+          const stagingRow = existingById.get(r.id);
+          return {
+            id: r.id,
+            stage: r.stage,
+            reason: r.error,
+            missingBeforeRpc: missingBeforeRpcSet.has(r.id),
+            name: stagingRow?.name || null,
+            stagingStatus: stagingRow?.status || null,
+            h3Id: stagingRow?.h3_id || null
+          };
+        });
+      const failedByStage = failedDetails.reduce<Record<string, number>>((acc, detail) => {
+        acc[detail.stage] = (acc[detail.stage] || 0) + 1;
+        return acc;
+      }, {});
 
       const successCount = approvedIds.length + duplicateIds.length;
       const failedCount = failedIds.length;
+      const missingBeforeRpcCount = missingBeforeRpc.length;
+      const missingBeforeRpcIds = missingBeforeRpc;
+
+      if (failedCount > 0) {
+        console.error('Bulk approve diagnostics:', {
+          requestedCount: uniqueIds.length,
+          successCount,
+          failedCount,
+          missingBeforeRpcCount,
+          missingBeforeRpc,
+          failedByStage,
+          failedDetails
+        });
+      }
 
       if (successCount > 0) {
         // Update hex tile staged count - recalculate from database to ensure accuracy
@@ -495,22 +561,39 @@ async function handleBulkUpdateStatus(body: any): Promise<NextResponse> {
           successCount,
           failedCount,
           failedIds,
+          failedDetails,
+          failedByStage,
+          missingBeforeRpcCount,
+          missingBeforeRpcIds,
           approvedIds,
           duplicateIds
         });
       }
 
+      const notFoundReasonPattern = /(not found|does not exist|may not exist|missing staging row)/i;
+      const allFailuresAreNotFound =
+        failedDetails.length > 0 &&
+        failedDetails.every((detail) => notFoundReasonPattern.test(detail.reason));
+      const failureStatus = allFailuresAreNotFound ? 404 : 500;
+      const failureMessage = allFailuresAreNotFound
+        ? `Failed to approve any restaurants. All ${failedCount} restaurant${failedCount === 1 ? '' : 's'} may not exist in database.`
+        : `Failed to approve restaurants due to backend error. ${failedCount} failed.`;
+
       return NextResponse.json(
         {
           success: false,
-          message: `Failed to approve any restaurants. All ${failedCount} restaurant${failedCount === 1 ? '' : 's'} may not exist in database.`,
+          message: failureMessage,
           successCount: 0,
           failedCount,
           failedIds,
+          failedDetails,
+          failedByStage,
+          missingBeforeRpcCount,
+          missingBeforeRpcIds,
           approvedIds: [],
           duplicateIds: []
         },
-        { status: 404 }
+        { status: failureStatus }
       );
     }
 

@@ -167,6 +167,17 @@ export interface DuplicateInfo {
   h3Id?: string;               // Hexagon ID of existing record
 }
 
+export interface StagingInsertError {
+  h3Id: string;
+  batchIndex: number;
+  sampleIds: string[];
+  code: string | null;
+  message: string;
+  details: string | null;
+  hint: string | null;
+  kind: 'insert_error' | 'unique_conflict';
+}
+
 /**
  * Batch create staging businesses
  * More efficient than individual creates for large batches
@@ -177,8 +188,11 @@ export interface BatchCreateStats {
   createdCount: number;
   skippedCount: number;
   errorCount: number;
+  validationErrorCount: number;
+  insertErrorCount: number;
   newBusinesses: YelpBusiness[]; // Actual businesses that were newly inserted
   duplicates: DuplicateInfo[];   // Details about each duplicate found
+  insertErrors: StagingInsertError[];
 }
 
 export async function batchCreateYelpStaging(
@@ -199,8 +213,11 @@ export async function batchCreateYelpStaging(
     let createdCount = 0;
     let skippedCount = 0;
     let errorCount = 0;
+    let validationErrorCount = 0;
+    let insertErrorCount = 0;
     const newBusinesses: YelpBusiness[] = []; // Track businesses that were actually inserted
     const allDuplicates: DuplicateInfo[] = []; // Track duplicates across all batches
+    const insertErrors: StagingInsertError[] = [];
     
     // Process in batches to avoid overwhelming the database
     const batchSize = 50;
@@ -217,6 +234,7 @@ export async function batchCreateYelpStaging(
           // Log validation error with clear formatting
           logValidationError(business, context, validation.errors);
           errorCount++;
+          validationErrorCount++;
           continue; // Skip invalid business
         }
         
@@ -225,8 +243,15 @@ export async function batchCreateYelpStaging(
       
       console.log(`    Validation: ${validBusinesses.length} valid, ${batch.length - validBusinesses.length} invalid`);
       
-      // Step 2: Check for duplicates with single batch query (using name+address matching)
-      const duplicateMap = await batchCheckDuplicatesByNameAddress(validBusinesses);
+      // Step 2: Check duplicates by Yelp ID first, then by name+address
+      const duplicateMapById = await batchCheckDuplicates(validBusinesses.map(business => business.id));
+      const duplicateMapByNameAddress = await batchCheckDuplicatesByNameAddress(validBusinesses);
+      const duplicateMap = new Map<string, YelpStaging>(duplicateMapById);
+      duplicateMapByNameAddress.forEach((record, key) => {
+        if (!duplicateMap.has(key)) {
+          duplicateMap.set(key, record);
+        }
+      });
 
       // Build duplicate info array
       const duplicatesInBatch: DuplicateInfo[] = [];
@@ -279,6 +304,93 @@ export async function batchCreateYelpStaging(
             cityId,
             importLogId
           });
+          // Handle unique conflicts as duplicate races instead of opaque hard-fail
+          if (error.code === '23505') {
+            const idsToRecover = newBusinessesInBatch.map(business => business.id);
+            const existingBeforeRecovery = await batchCheckDuplicates(idsToRecover);
+            const { error: recoveryError } = await supabaseServer
+              .from('yelp_staging')
+              .upsert(stagingRecords, { onConflict: 'id', ignoreDuplicates: true });
+
+            if (recoveryError) {
+              insertErrorCount++;
+              errorCount++;
+              insertErrors.push({
+                h3Id,
+                batchIndex: i,
+                sampleIds: idsToRecover.slice(0, 5),
+                code: recoveryError.code,
+                message: recoveryError.message,
+                details: recoveryError.details,
+                hint: recoveryError.hint,
+                kind: 'insert_error'
+              });
+            } else {
+              const existingAfterRecovery = await batchCheckDuplicates(idsToRecover);
+              const recoveredPresentCount = existingAfterRecovery.size;
+              const recoveredCreatedCount = Math.max(0, recoveredPresentCount - existingBeforeRecovery.size);
+              const recoveredConflictCount = existingBeforeRecovery.size;
+              const recoveredMissingCount = Math.max(0, idsToRecover.length - recoveredPresentCount);
+
+              if (recoveredCreatedCount > 0) {
+                createdCount += recoveredCreatedCount;
+                const beforeSet = new Set(existingBeforeRecovery.keys());
+                const recoveredNewBusinesses = newBusinessesInBatch.filter(business => !beforeSet.has(business.id));
+                newBusinesses.push(...recoveredNewBusinesses.slice(0, recoveredCreatedCount));
+              }
+
+              if (recoveredConflictCount > 0) {
+                skippedCount += recoveredConflictCount;
+                existingBeforeRecovery.forEach((existing, yelpId) => {
+                  allDuplicates.push({
+                    yelpId,
+                    cityId: existing.city_id,
+                    h3Id: existing.h3_id
+                  });
+                });
+                insertErrors.push({
+                  h3Id,
+                  batchIndex: i,
+                  sampleIds: Array.from(existingBeforeRecovery.keys()).slice(0, 5),
+                  code: error.code,
+                  message: error.message,
+                  details: error.details,
+                  hint: error.hint,
+                  kind: 'unique_conflict'
+                });
+              }
+
+              if (recoveredMissingCount > 0) {
+                insertErrorCount++;
+                errorCount++;
+                const persistedIds = new Set(existingAfterRecovery.keys());
+                const missingIds = idsToRecover.filter(id => !persistedIds.has(id));
+                insertErrors.push({
+                  h3Id,
+                  batchIndex: i,
+                  sampleIds: missingIds.slice(0, 5),
+                  code: error.code,
+                  message: 'Unique-conflict recovery was incomplete; some rows are still missing',
+                  details: error.details,
+                  hint: error.hint,
+                  kind: 'insert_error'
+                });
+              }
+            }
+          } else {
+            insertErrorCount++;
+            errorCount++;
+            insertErrors.push({
+              h3Id,
+              batchIndex: i,
+              sampleIds: newBusinessesInBatch.map(business => business.id).slice(0, 5),
+              code: error.code,
+              message: error.message,
+              details: error.details,
+              hint: error.hint,
+              kind: 'insert_error'
+            });
+          }
           // Continue with next batch even if this one fails
         } else {
           createdCount += newBusinessesInBatch.length;
@@ -291,14 +403,20 @@ export async function batchCreateYelpStaging(
     }
     
     // Log summary
-    console.log(`📊 batchCreateYelpStaging summary: ${createdCount} saved, ${skippedCount} duplicates skipped, ${errorCount} validation errors`);
+    console.log(
+      `📊 batchCreateYelpStaging summary: ${createdCount} saved, ${skippedCount} duplicates skipped, ` +
+      `${validationErrorCount} validation errors, ${insertErrorCount} insert errors`
+    );
     
     return {
       createdCount,
       skippedCount,
       errorCount,
+      validationErrorCount,
+      insertErrorCount,
       newBusinesses,
-      duplicates: allDuplicates
+      duplicates: allDuplicates,
+      insertErrors
     };
   } catch (error) {
     console.error('❌ Exception in batchCreateYelpStaging:', {
@@ -313,8 +431,20 @@ export async function batchCreateYelpStaging(
       createdCount: 0,
       skippedCount: 0,
       errorCount: businesses.length, // Assume all failed on exception
+      validationErrorCount: 0,
+      insertErrorCount: businesses.length,
       newBusinesses: [],
-      duplicates: []
+      duplicates: [],
+      insertErrors: [{
+        h3Id,
+        batchIndex: -1,
+        sampleIds: businesses.map((business) => business.id).filter(Boolean).slice(0, 5),
+        code: null,
+        message: error instanceof Error ? error.message : String(error),
+        details: null,
+        hint: null,
+        kind: 'insert_error'
+      }]
     };
   }
 }

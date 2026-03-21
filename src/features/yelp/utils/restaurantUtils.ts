@@ -52,7 +52,7 @@ export function detectFranchise(restaurantName: string): boolean {
     /\b(applebee'?s?|chili'?s?|olive\s+garden|red\s+lobster|outback\s+steakhouse|texas\s+roadhouse|longhorn\s+steakhouse)\b/,
     
     // Fast Casual & Modern Chains
-    /\b(cava|sweetgreen|blaze\s+pizza|mod\s+pizza|&pizza|pieology)\b/,
+    /\b(cava|sweetgreen|blaze\s+pizza|mod\s+pizza|&pizza|pieology|chicken\s+kitchen|carrot\s+express)\b/,
   ];
   
   // Test against all patterns
